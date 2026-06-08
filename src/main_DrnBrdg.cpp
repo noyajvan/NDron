@@ -34,10 +34,10 @@
 struct Config {
   char     sta_ssid[32]  = "LEO";
   char     sta_pass[64]  = "88888888";
-  uint32_t baud          = 115200;
+  uint32_t baud          = 230400;
   String   stations[MAX_STATIONS];
   int      current_station_count = 0;
-  uint8_t  wifi_boot       = 0;
+  uint8_t  wifi_boot       = 1;
 } cfg;
 
 Adafruit_NeoPixel pixels(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
@@ -67,7 +67,6 @@ uint8_t           txBuf[MAVLINK_MAX_PACKET_LEN];
 struct Point { int32_t lat=0; int32_t lon=0; bool relay=false; bool received=false; };
 Point pTg;
 
-uint8_t  mdFly = 0;
 uint16_t mission_count = 0;
 bool     mission_loaded = false, heartbeat_received = false;
 uint32_t current_custom_mode = 0;
@@ -85,8 +84,6 @@ unsigned long lastMissionReq = 0;
 unsigned long lastMissionScan = 0;
 
 // Crash detection & failsafe
-bool land_seen = false;
-bool relayAfterLand = false;
 bool last_arm_state = false;
 float current_alt = 0.0, last_stable_alt = 0.0;
 float roll = 0.0, pitch = 0.0;
@@ -97,10 +94,29 @@ unsigned long stuck_timer = 0, roof_stuck_timer = 0, gyro_crash_timer = 0;
 bool emergency_triggered = false;
 bool wasFlying = false;
 bool failsafePending = false;
-bool failsafeRelay = false;
 uint8_t failsafeStep = 0;
 uint8_t failsafeRepeat = 0;
 unsigned long failsafeTime = 0;
+bool autoArmDone = false;
+unsigned long autoArmTime = 0;
+uint8_t autoArmRetries = 0;
+uint8_t gps_fix_type = 0;
+uint8_t gps_sats = 0;
+unsigned long gps_ok_since = 0;
+
+bool bootDone = false;
+uint8_t bootState = 0;
+unsigned long bootTimer = 0;
+uint8_t targetWiFi = 0;
+bool tiltInBoot = false;
+
+#define MODE_STABILIZE  0
+#define MODE_AUTO       3
+
+#define STATUS_QUEUE_SIZE 12
+char status_queue[STATUS_QUEUE_SIZE][64];
+uint8_t q_write = 0;
+uint8_t q_read = 0;
 
 String inputBuffer = "";
 
@@ -142,6 +158,8 @@ void saveConfig() {
 }
 
 void send_statustext(const char* text);
+void queue_statustext(const char* text);
+void send_queued_statustext();
 
 void wifiActivate() {
   if (wifiOn) return;
@@ -159,13 +177,14 @@ void wifiActivate() {
     wifiActivating = true;
     wifiActivateTime = millis();
     Serial.printf("Connecting to STA: %s\n", cfg.sta_ssid);
-    send_statustext("WiFi STA Connecting");
+    queue_statustext("WiFi STA Connecting");
   } else {
     Serial.println("STA SSID is empty. Use terminal to set it.");
   }
   
   tcpServer.begin();
   udp.begin(UDP_PORT);
+  queue_statustext("WiFi ON");
 }
 
 void wifiDeactivate() {
@@ -184,7 +203,7 @@ void wifiDeactivate() {
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
   Serial.println("WiFi OFF (Radio Disabled)");
-  send_statustext("WiFi OFF");
+  queue_statustext("WiFi OFF");
 }
 
 void fcBegin(int baud, int rx, int tx) {
@@ -244,6 +263,13 @@ void forwardToWiFi(const uint8_t* data, size_t len) {
       tcpClients[i].flush();
     }
   }
+
+  IPAddress gw = WiFi.gatewayIP();
+  if (gw != IPAddress(0,0,0,0)) {
+    udp.beginPacket(gw, UDP_PORT); udp.write(data, len); udp.endPacket();
+  }
+  IPAddress bcast = IPAddress((uint32_t)WiFi.localIP() | ~(uint32_t)WiFi.subnetMask());
+  udp.beginPacket(bcast, UDP_PORT); udp.write(data, len); udp.endPacket();
 }
 
 void sendToBoth(const uint8_t* data, uint16_t len) {
@@ -255,6 +281,24 @@ void send_statustext(const char* text) {
   mavlink_msg_statustext_pack(SYS_ID, COMP_ID, &txMsg, MAV_SEVERITY_INFO, text, 0, 0);
   uint16_t len = mavlink_msg_to_send_buffer(txBuf, &txMsg);
   fcWrite(txBuf, len);
+}
+
+void queue_statustext(const char* text) {
+  uint8_t next = (q_write + 1) % STATUS_QUEUE_SIZE;
+  if (next == q_read) q_read = (q_read + 1) % STATUS_QUEUE_SIZE;
+  strncpy(status_queue[q_write], text, 63);
+  status_queue[q_write][63] = '\0';
+  q_write = next;
+}
+
+void send_queued_statustext() {
+  for (int i = 0; i < 5 && q_read != q_write; i++) {
+    mavlink_msg_statustext_pack(SYS_ID, COMP_ID, &txMsg,
+                                MAV_SEVERITY_INFO, status_queue[q_read], 0, 0);
+    uint16_t len = mavlink_msg_to_send_buffer(txBuf, &txMsg);
+    sendToBoth(txBuf, len);
+    q_read = (q_read + 1) % STATUS_QUEUE_SIZE;
+  }
 }
 
 void send_heartbeat() {
@@ -297,11 +341,27 @@ void sendMavlinkSetRelay() {
     MAV_CMD_DO_SET_RELAY, 0, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
   uint16_t len = mavlink_msg_to_send_buffer(buf, &msg); fcWrite(buf, len);
   Serial.println("[FAILSAFE] RELAY");
+  queue_statustext("Relay ON");
+}
+
+void sendMavlinkArm() {
+  mavlink_message_t msg; uint8_t buf[MAVLINK_MAX_PACKET_LEN];
+  mavlink_msg_command_long_pack(SYS_ID, COMP_ID, &msg, 1, MAV_COMP_ID_AUTOPILOT1,
+    MAV_CMD_COMPONENT_ARM_DISARM, 0, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+  uint16_t len = mavlink_msg_to_send_buffer(buf, &msg); fcWrite(buf, len);
+  Serial.println("[AUTO-ARM] Sent");
+}
+
+void sendMavlinkSetMode(uint8_t mode) {
+  mavlink_message_t msg; uint8_t buf[MAVLINK_MAX_PACKET_LEN];
+  mavlink_msg_command_long_pack(SYS_ID, COMP_ID, &msg, 1, MAV_COMP_ID_AUTOPILOT1,
+    MAV_CMD_DO_SET_MODE, 0, MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, mode, 0, 0, 0, 0, 0);
+  uint16_t len = mavlink_msg_to_send_buffer(buf, &msg); fcWrite(buf, len);
+  Serial.printf("[AUTO-MODE] Set mode %d\n", mode);
 }
 
 void executeFailsafeAsync() {
   failsafePending = true; failsafeStep = 0; failsafeTime = millis();
-  failsafeRelay = relayAfterLand;
   Serial.println("[FAILSAFE] PENDING");
 }
 
@@ -311,14 +371,16 @@ void handle_mavlink_message(mavlink_message_t* msg) {
       mavlink_heartbeat_t hb;
       mavlink_msg_heartbeat_decode(msg, &hb);
       heartbeat_received = true;
+      static bool first_hb = false;
+      if (!first_hb) { first_hb = true; queue_statustext("Mavlink OK"); }
       current_custom_mode = hb.custom_mode;
       system_status = hb.system_status;
       if (hb.custom_mode == TAKEOFF_MODE) takeoff_mode_detected = true;
       is_armed = (hb.base_mode & MAV_MODE_FLAG_SAFETY_ARMED) != 0;
-      if (last_arm_state && !is_armed && !emergency_triggered && wasFlying) {
+      if (last_arm_state && !is_armed && !emergency_triggered && wasFlying && autoArmDone) {
         emergency_triggered = true;
         sendMavlinkForceDisarm();
-        if (relayAfterLand) sendMavlinkSetRelay();
+        sendMavlinkSetRelay();
         Serial.println("[LAND] Disarm + action");
       }
       last_arm_state = is_armed;
@@ -328,7 +390,6 @@ void handle_mavlink_message(mavlink_message_t* msg) {
       mavlink_mission_count_t mc;
       mavlink_msg_mission_count_decode(msg, &mc);
       mission_count = mc.count; mission_loaded = false; pTg = Point();
-      land_seen = false; relayAfterLand = false;
       Serial.printf("MISSCOUNT=%d\n", mission_count);
       if (mission_count > 0) send_mission_request_int(0);
       break;
@@ -341,10 +402,6 @@ void handle_mavlink_message(mavlink_message_t* msg) {
         { pTg.lat = item.x; pTg.lon = item.y; pTg.received = true; }
       if (item.command == MAV_CMD_DO_SET_RELAY &&
           item.param2 > 0.9f) pTg.relay = true;
-      if (item.command == MAV_CMD_NAV_LAND) land_seen = true;
-      if (land_seen && item.command == MAV_CMD_DO_SET_RELAY &&
-          item.param2 > 0.9f) { relayAfterLand = true;
-        Serial.printf("[MISSION] RELAY %.0f 1 after LAND\n", item.param1); }
       Serial.printf("ITEM: s=%d c=%d p=%.2f\n", item.seq, item.command, item.param1);
       if (item.seq + 1 < mission_count) send_mission_request_int(item.seq + 1);
       else { mission_loaded = true; missionFirstParsed = true; lastMissionReq = 0; }
@@ -376,12 +433,21 @@ void handle_mavlink_message(mavlink_message_t* msg) {
     case MAVLINK_MSG_ID_RAW_IMU: {
       mavlink_raw_imu_t imu;
       mavlink_msg_raw_imu_decode(msg, &imu);
-      if (!emergency_triggered && wasFlying && is_armed) {
+      if (!emergency_triggered && wasFlying && is_armed && autoArmDone) {
         if (abs(imu.xgyro) > 4500 || abs(imu.ygyro) > 4500) {
           if (gyro_crash_timer == 0) gyro_crash_timer = millis();
           if (millis() - gyro_crash_timer > 150) { emergency_triggered = true; executeFailsafeAsync(); Serial.println("[CRASH] Tumble"); }
         } else { gyro_crash_timer = 0; }
       }
+      break;
+    }
+    case MAVLINK_MSG_ID_GPS_RAW_INT: {
+      mavlink_gps_raw_int_t gps;
+      mavlink_msg_gps_raw_int_decode(msg, &gps);
+      gps_fix_type = gps.fix_type;
+      gps_sats = gps.satellites_visible;
+      if (gps_fix_type >= 3 && gps_sats >= 6 && gps_ok_since == 0) gps_ok_since = millis();
+      if (gps_fix_type < 3 || gps_sats < 6) gps_ok_since = 0;
       break;
     }
   }
@@ -538,8 +604,133 @@ void handleTerminalConfig() {
   }
 }
 
+void handleTiltDetect() {
+  float r = roll * 57.2958f;
+  if (r >= 30.0f && r <= 120.0f)        { targetWiFi = 1; tiltInBoot = true; }
+  else if (r >= -120.0f && r <= -30.0f)  { targetWiFi = 0; tiltInBoot = true; }
+}
+
+void bootSequence() {
+  if (bootDone) return;
+  unsigned long now = millis();
+
+  switch (bootState) {
+    case 0: {
+      static bool attOk = false;
+      if (!attOk && fabs(roll) > 0.0087f) attOk = true;
+      if (heartbeat_received && attOk) {
+        if (!bootTimer) bootTimer = now;
+        if (now - bootTimer >= 3000) {
+          targetWiFi = cfg.wifi_boot;
+          tiltInBoot = false;
+          bootTimer = now; bootState = 1;
+        }
+      } else {
+        bootTimer = 0;
+      }
+      break;
+    }
+
+    case 1: {
+      handleTiltDetect();
+      if (now - bootTimer > 10000) {
+        if (targetWiFi != cfg.wifi_boot) {
+          bootTimer = now; bootState = 2;
+        } else {
+          bootState = 3;
+        }
+      }
+      break;
+    }
+
+    case 2: {
+      float r = roll * 57.2958f;
+      if (r >= -20.0f && r <= 20.0f) {
+        if (now - bootTimer > 5000) bootState = 3;
+      } else {
+        bootTimer = now;
+        handleTiltDetect();
+      }
+      break;
+    }
+
+    case 3:
+      if (targetWiFi != cfg.wifi_boot) {
+        cfg.wifi_boot = targetWiFi;
+        saveConfig();
+      }
+      if (cfg.wifi_boot && !wifiOn) wifiActivate();
+      if (!cfg.wifi_boot && wifiOn) wifiDeactivate();
+      bootDone = true;
+      break;
+  }
+}
+
+void mdFly() {
+  if (!bootDone || autoArmDone) return;
+  unsigned long now = millis();
+  static uint8_t mdState = 0;
+
+  switch (mdState) {
+    case 0:
+      if (!missionFirstParsed) return;
+      if (gps_fix_type >= 3 && gps_sats >= 6 && gps_ok_since > 0 && millis() - gps_ok_since >= 3000) {
+        if (current_custom_mode == MODE_STABILIZE && system_status == MAV_STATE_STANDBY && !is_armed && now - autoArmTime > 10000) {
+          queue_statustext("Rdy to ARM");
+          sendMavlinkArm();
+          queue_statustext("ARM");
+          autoArmTime = now;
+          autoArmRetries++;
+          mdState = 1;
+        }
+      }
+      break;
+
+    case 1:
+      if (is_armed) {
+        queue_statustext("Rdy to AUTO");
+        sendMavlinkSetMode(MODE_AUTO);
+        autoArmTime = now;
+        mdState = 2;
+      } else if (now - autoArmTime > 10000) {
+        mdState = 0;
+      }
+      break;
+
+    case 2:
+      if (current_custom_mode == MODE_AUTO) {
+        autoArmDone = true;
+        mdState = 0;
+        queue_statustext("AUTO");
+      } else if (now - autoArmTime > 10000) {
+        mdState = 0;
+      }
+      break;
+  }
+}
+
 void updateLED() {
   unsigned long now = millis();
+
+  if (!bootDone) {
+    if (bootState == 0) {
+      setLed((now % 1000 < 500) ? (cfg.wifi_boot ? LED_BLUE : LED_WHITE) : LED_OFF);
+      return;
+    }
+    if (bootState == 1) {
+      if (tiltInBoot) {
+        setLed(targetWiFi ? LED_PURPLE : LED_OFF);
+      } else {
+        setLed((now % 500 < 250) ? LED_PURPLE : LED_OFF);
+      }
+      return;
+    }
+    if (bootState == 2) {
+      setLed(targetWiFi ? LED_PURPLE : LED_OFF);
+      return;
+    }
+    return;
+  }
 
   if (emergency_triggered || failsafePending) { setLed(LED_RED); return; }
 
@@ -573,10 +764,18 @@ void setup() {
   start_time = millis();
   Serial.println("\n=== ESP32-S3 DropCtrlV3 Tailscale Ready ===");
   Serial.println("Terminal configuration active. Type 'STATUS' for info.");
-  send_statustext("ESP32-S3 Tailscale Ready");
+  queue_statustext("ESP32-S3 Tailscale Ready");
 }
 
 void loop() {
+  static unsigned long apAutoStart = 0;
+  if (heartbeat_received) { apAutoStart = millis(); }
+  else if (!wifiOn && apAutoStart == 0) { apAutoStart = millis(); }
+  else if (!heartbeat_received && !wifiOn && millis() - apAutoStart > 10000) {
+    Serial.println("No FC heartbeat - starting AP for config");
+    wifiActivate();
+    apAutoStart = millis();
+  }
   handleTerminalConfig();
 
   if (wifiOn) {
@@ -586,7 +785,7 @@ void loop() {
   bridgeFCtoWiFi();
 
   unsigned long now = millis();
-  if (now - last_wifi_hb >= 1000)       { send_heartbeat(); last_wifi_hb = now; }
+  if (now - last_wifi_hb >= 1000)       { send_heartbeat(); send_queued_statustext(); last_wifi_hb = now; }
   if (now - last_radio_status >= 2000)  { send_radio_status(); last_radio_status = now; }
 
   static unsigned long lastBootPress = 0;
@@ -618,19 +817,22 @@ void loop() {
     if (failsafeStep == 0) {
       sendMavlinkForceDisarm(); failsafeStep = 1; failsafeTime = fn;
     } else if (failsafeStep == 1 && fn - failsafeTime >= 25) {
-      if (failsafeRelay) sendMavlinkSetRelay(); failsafeStep = 2; failsafeTime = fn;
+      sendMavlinkSetRelay(); failsafeStep = 2; failsafeTime = fn;
     } else if (failsafeStep == 2 && fn - failsafeTime >= 50) {
       failsafePending = false;
       Serial.println("[FAILSAFE] Complete");
     }
   }
 
+  bootSequence();
+  mdFly();
+
   if (wifiActivating && WiFi.status() == WL_CONNECTED) {
     wifiActivating = false;
     staRetryCount = 0;
     staWasConnected = true;
     Serial.printf("STA Connected successfully! IP: %s\n", WiFi.localIP().toString().c_str());
-    send_statustext("WiFi STA OK");
+    queue_statustext("WiFi STA OK");
   }
 
   if (wifiActivating && now - wifiActivateTime > 20000) {
@@ -658,11 +860,11 @@ void loop() {
     last_sta_status = st;
     if (st == WL_CONNECTED) {
       staWasConnected = true;
-      send_statustext(String("STA IP: " + WiFi.localIP().toString()).c_str());
+      queue_statustext(String("STA IP: " + WiFi.localIP().toString()).c_str());
     } else if (st == WL_CONNECT_FAILED)
-      send_statustext("STA FAIL: check password");
+      queue_statustext("STA FAIL: check password");
     else if (st == WL_NO_SSID_AVAIL)
-      send_statustext("STA FAIL: no SSID found");
+      queue_statustext("STA FAIL: no SSID found");
   }
 
   if (now - last_serial_log >= 5000) {
