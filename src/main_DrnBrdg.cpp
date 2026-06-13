@@ -28,17 +28,19 @@
 #define COMP_ID         MAV_COMP_ID_ONBOARD_COMPUTER
 #define TAKEOFF_MODE    13
 
-// Максимальна кількість статичних Tailscale наземок
+// РњР°РєСЃРёРјР°Р»СЊРЅР° РєС–Р»СЊРєС–СЃС‚СЊ СЃС‚Р°С‚РёС‡РЅРёС… Tailscale РЅР°Р·РµРјРѕРє
 #define MAX_STATIONS 5
 
 struct Config {
   char     sta_ssid[32]  = "LEO";
   char     sta_pass[64]  = "88888888";
   uint32_t baud          = 230400;
-  String   stations[MAX_STATIONS];
-  int      current_station_count = 0;
+  String   stations[MAX_STATIONS] = {"100.104.253.54", "", "", "", ""};
+  int      current_station_count = 1;
   uint8_t  wifi_boot       = 1;
 } cfg;
+
+unsigned long stationFailTime[MAX_STATIONS] = {0};
 
 Adafruit_NeoPixel pixels(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
 #define FC_UART_NUM 0
@@ -54,7 +56,7 @@ unsigned long wifiActivateTime = 0;
 uint8_t staRetryCount = 0;
 bool staWasConnected = false;
 
-// Буфер для динамічних клієнтів (які самі надіслали пакет)
+// Р‘СѓС„РµСЂ РґР»СЏ РґРёРЅР°РјС–С‡РЅРёС… РєР»С–С”РЅС‚С–РІ (СЏРєС– СЃР°РјС– РЅР°РґС–СЃР»Р°Р»Рё РїР°РєРµС‚)
 struct { IPAddress ip; uint16_t port; bool active; } udpClients[MAX_UDP_CLIENTS];
 bool gsConnected = false;
 
@@ -127,10 +129,10 @@ void loadConfig() {
   p.begin("dbridge", true);
   p.getString("sta_ssid", cfg.sta_ssid, sizeof(cfg.sta_ssid));
   p.getString("sta_pass", cfg.sta_pass, sizeof(cfg.sta_pass));
-  cfg.baud    = p.getUInt("baud", 115200);
+  cfg.baud    = p.getUInt("baud", 230400);
   
-  cfg.current_station_count = p.getInt("st_count", 0);
-  cfg.wifi_boot = p.getUInt("wifi_boot", 0);
+  cfg.current_station_count = p.getInt("st_count", 1);
+  cfg.wifi_boot = p.getUInt("wifi_boot", 1);
   for (int i = 0; i < cfg.current_station_count; i++) {
     String key = "ip_" + String(i);
     cfg.stations[i] = p.getString(key.c_str(), "");
@@ -160,6 +162,22 @@ void saveConfig() {
 void send_statustext(const char* text);
 void queue_statustext(const char* text);
 void send_queued_statustext();
+
+void switchToSmartStaticIP() {
+  IPAddress ip = WiFi.localIP();
+  IPAddress gw = WiFi.gatewayIP();
+  IPAddress mask = WiFi.subnetMask();
+  if (gw == IPAddress(0,0,0,0) || ip == IPAddress(0,0,0,0)) return;
+  uint8_t mac[6];
+  WiFi.macAddress(mac);
+  uint8_t id = mac[5];
+  uint8_t ipTail = 201 + (id % 54);
+  IPAddress newIP(gw[0], gw[1], gw[2], ipTail);
+  WiFi.config(newIP, gw, mask);
+  WiFi.disconnect(false);
+  WiFi.reconnect();
+  Serial.printf("[IP] Set to %d.%d.%d.%d (MAC 0x%02X)\n", gw[0], gw[1], gw[2], ipTail, id);
+}
 
 void wifiActivate() {
   if (wifiOn) return;
@@ -236,18 +254,19 @@ void sendToFC(const uint8_t* data, uint16_t len) { fcWrite(data, len); }
 void forwardToWiFi(const uint8_t* data, size_t len) {
   if (!wifiOn || WiFi.status() != WL_CONNECTED) return;
   
-  // 1. Паралельне надсилання на всі введені Tailscale наземки з терміналу
+  // 1. РџР°СЂР°Р»РµР»СЊРЅРµ РЅР°РґСЃРёР»Р°РЅРЅСЏ РЅР° РІСЃС– РІРІРµРґРµРЅС– Tailscale РЅР°Р·РµРјРєРё Р· С‚РµСЂРјС–РЅР°Р»Сѓ
   if (cfg.current_station_count > 0) {
+    unsigned long now = millis();
     for (int i = 0; i < cfg.current_station_count; i++) {
-      if (cfg.stations[i].length() > 0) {
-        udp.beginPacket(cfg.stations[i].c_str(), UDP_PORT);
-        udp.write(data, len);
-        udp.endPacket();
-      }
+      if (cfg.stations[i].length() == 0) continue;
+      if (stationFailTime[i] && now - stationFailTime[i] < 10000) continue;
+      udp.beginPacket(cfg.stations[i].c_str(), UDP_PORT);
+      udp.write(data, len);
+      if (!udp.endPacket()) stationFailTime[i] = now;
     }
   }
 
-  // 2. Надсилання на динамічні UDP клієнти (якщо з'явиться сторонній пристрій всередині локальної підмережі роутера)
+  // 2. РќР°РґСЃРёР»Р°РЅРЅСЏ РЅР° РґРёРЅР°РјС–С‡РЅС– UDP РєР»С–С”РЅС‚Рё (СЏРєС‰Рѕ Р·'СЏРІРёС‚СЊСЃСЏ СЃС‚РѕСЂРѕРЅРЅС–Р№ РїСЂРёСЃС‚СЂС–Р№ РІСЃРµСЂРµРґРёРЅС– Р»РѕРєР°Р»СЊРЅРѕС— РїС–РґРјРµСЂРµР¶С– СЂРѕСѓС‚РµСЂР°)
   for (int i = 0; i < MAX_UDP_CLIENTS; i++) {
     if (udpClients[i].active) {
       udp.beginPacket(udpClients[i].ip, udpClients[i].port);
@@ -256,7 +275,7 @@ void forwardToWiFi(const uint8_t* data, size_t len) {
     }
   }
 
-  // 3. Надсилання на TCP клієнтів (якщо використовуються)
+  // 3. РќР°РґСЃРёР»Р°РЅРЅСЏ РЅР° TCP РєР»С–С”РЅС‚С–РІ (СЏРєС‰Рѕ РІРёРєРѕСЂРёСЃС‚РѕРІСѓСЋС‚СЊСЃСЏ)
   for (int i = 0; i < 4; i++) {
     if (tcpClients[i] && tcpClients[i].connected()) {
       tcpClients[i].write(data, len);
@@ -304,7 +323,7 @@ void send_queued_statustext() {
 void send_heartbeat() {
   mavlink_msg_heartbeat_pack(SYS_ID, COMP_ID, &txMsg, MAV_TYPE_ONBOARD_CONTROLLER, MAV_AUTOPILOT_INVALID, 0, 0, 0);
   uint16_t len = mavlink_msg_to_send_buffer(txBuf, &txMsg);
-  sendToBoth(txBuf, len);
+  fcWrite(txBuf, len);
 }
 
 void send_radio_status() {
@@ -372,7 +391,13 @@ void handle_mavlink_message(mavlink_message_t* msg) {
       mavlink_msg_heartbeat_decode(msg, &hb);
       heartbeat_received = true;
       static bool first_hb = false;
-      if (!first_hb) { first_hb = true; queue_statustext("Mavlink OK"); }
+      if (!first_hb) { first_hb = true; queue_statustext("Mavlink OK");
+        mavlink_msg_command_long_pack(SYS_ID, COMP_ID, &txMsg, 1, MAV_COMP_ID_AUTOPILOT1,
+          MAV_CMD_SET_MESSAGE_INTERVAL, 0, MAVLINK_MSG_ID_ATTITUDE, 100000, 0, 0, 0, 0, 0);
+        uint16_t l = mavlink_msg_to_send_buffer(txBuf, &txMsg); fcWrite(txBuf, l);
+        mavlink_msg_command_long_pack(SYS_ID, COMP_ID, &txMsg, 1, MAV_COMP_ID_AUTOPILOT1,
+          MAV_CMD_SET_MESSAGE_INTERVAL, 0, MAVLINK_MSG_ID_RAW_IMU, 100000, 0, 0, 0, 0, 0);
+        l = mavlink_msg_to_send_buffer(txBuf, &txMsg); fcWrite(txBuf, l); }
       current_custom_mode = hb.custom_mode;
       system_status = hb.system_status;
       if (hb.custom_mode == TAKEOFF_MODE) takeoff_mode_detected = true;
@@ -412,7 +437,7 @@ void handle_mavlink_message(mavlink_message_t* msg) {
     case MAVLINK_MSG_ID_ATTITUDE: {
       mavlink_attitude_t att;
       mavlink_msg_attitude_decode(msg, &att);
-      roll = att.roll; pitch = att.pitch;
+      roll = att.roll * 57.2958f; pitch = att.pitch * 57.2958f;
       break;
     }
     case MAVLINK_MSG_ID_VFR_HUD: {
@@ -495,7 +520,7 @@ void handleTcpClients() {
     }
 }
 
-// Прийом даних: будь-яка Tailscale наземка передає команди на дрон
+// РџСЂРёР№РѕРј РґР°РЅРёС…: Р±СѓРґСЊ-СЏРєР° Tailscale РЅР°Р·РµРјРєР° РїРµСЂРµРґР°С” РєРѕРјР°РЅРґРё РЅР° РґСЂРѕРЅ
 void bridgeWiFiToFC() {
   if (!wifiOn || WiFi.status() != WL_CONNECTED) return;
   int sz = udp.parsePacket();
@@ -504,11 +529,11 @@ void bridgeWiFiToFC() {
     if (n > 0) { 
       fcWrite(bridgeBuf, n); 
       
-      // Логуємо в термінал, з якої саме Tailscale-наземки прилетіла команда
+      // Р›РѕРіСѓС”РјРѕ РІ С‚РµСЂРјС–РЅР°Р», Р· СЏРєРѕС— СЃР°РјРµ Tailscale-РЅР°Р·РµРјРєРё РїСЂРёР»РµС‚С–Р»Р° РєРѕРјР°РЅРґР°
       IPAddress remoteIP = udp.remoteIP();
       Serial.printf("[GCS CMD] received %d bytes from Tailscale IP: %s\n", n, remoteIP.toString().c_str());
       
-      // Також реєструємо адресу в пул динамічних відповідей
+      // РўР°РєРѕР¶ СЂРµС”СЃС‚СЂСѓС”РјРѕ Р°РґСЂРµСЃСѓ РІ РїСѓР» РґРёРЅР°РјС–С‡РЅРёС… РІС–РґРїРѕРІС–РґРµР№
       addUdpClient(remoteIP, udp.remotePort()); 
     }
   }
@@ -605,9 +630,8 @@ void handleTerminalConfig() {
 }
 
 void handleTiltDetect() {
-  float r = roll * 57.2958f;
-  if (r >= 30.0f && r <= 120.0f)        { targetWiFi = 1; tiltInBoot = true; }
-  else if (r >= -120.0f && r <= -30.0f)  { targetWiFi = 0; tiltInBoot = true; }
+  if (roll >= 30.0f && roll <= 120.0f)        { targetWiFi = 1; tiltInBoot = true; }
+  else if (roll >= -120.0f && roll <= -30.0f)  { targetWiFi = 0; tiltInBoot = true; }
 }
 
 void bootSequence() {
@@ -616,9 +640,7 @@ void bootSequence() {
 
   switch (bootState) {
     case 0: {
-      static bool attOk = false;
-      if (!attOk && fabs(roll) > 0.0087f) attOk = true;
-      if (heartbeat_received && attOk) {
+      if (heartbeat_received) {
         if (!bootTimer) bootTimer = now;
         if (now - bootTimer >= 3000) {
           targetWiFi = cfg.wifi_boot;
@@ -736,7 +758,7 @@ void updateLED() {
 
   if (!heartbeat_received) { setLed((now % 1000 < 200) ? LED_WHITE : LED_OFF); return; }
 
-  uint32_t c = (current_custom_mode == 3) ? (is_armed ? LED_GREEN : LED_ORANGE) : LED_WHITE;
+  uint32_t c = (current_custom_mode == 3) ? (is_armed ? LED_GREEN : LED_ORANGE) : LED_ORANGE;
 
   if (!wifiOn) { setLed(c); return; }
 
@@ -833,6 +855,7 @@ void loop() {
     staWasConnected = true;
     Serial.printf("STA Connected successfully! IP: %s\n", WiFi.localIP().toString().c_str());
     queue_statustext("WiFi STA OK");
+    switchToSmartStaticIP();
   }
 
   if (wifiActivating && now - wifiActivateTime > 20000) {
