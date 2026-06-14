@@ -34,7 +34,7 @@
 struct Config {
   char     sta_ssid[32]  = "LEO";
   char     sta_pass[64]  = "88888888";
-  uint32_t baud          = 230400;
+  uint32_t baud          = 921600;
   String   stations[MAX_STATIONS] = {"100.104.253.54", "", "", "", ""};
   int      current_station_count = 1;
   uint8_t  wifi_boot       = 1;
@@ -129,7 +129,7 @@ void loadConfig() {
   p.begin("dbridge", true);
   p.getString("sta_ssid", cfg.sta_ssid, sizeof(cfg.sta_ssid));
   p.getString("sta_pass", cfg.sta_pass, sizeof(cfg.sta_pass));
-  cfg.baud    = p.getUInt("baud", 230400);
+  cfg.baud    = p.getUInt("baud", 921600);
   
   cfg.current_station_count = p.getInt("st_count", 1);
   cfg.wifi_boot = p.getUInt("wifi_boot", 1);
@@ -640,7 +640,7 @@ void bootSequence() {
 
   switch (bootState) {
     case 0: {
-      if (heartbeat_received) {
+      if (heartbeat_received && (roll != 0.0f || pitch != 0.0f)) {
         if (!bootTimer) bootTimer = now;
         if (now - bootTimer >= 3000) {
           targetWiFi = cfg.wifi_boot;
@@ -654,29 +654,32 @@ void bootSequence() {
     }
 
     case 1: {
+      if (now - bootTimer >= 3000) bootState = 2;
+      break;
+    }
+
+    case 2: {
       handleTiltDetect();
       if (now - bootTimer > 10000) {
         if (targetWiFi != cfg.wifi_boot) {
-          bootTimer = now; bootState = 2;
+          bootTimer = now; bootState = 3;
         } else {
-          bootState = 3;
+          bootState = 4;
         }
       }
       break;
     }
 
-    case 2: {
-      float r = roll * 57.2958f;
-      if (r >= -20.0f && r <= 20.0f) {
-        if (now - bootTimer > 5000) bootState = 3;
+    case 3: {
+      if (roll >= -20.0f && roll <= 20.0f) {
+        if (now - bootTimer > 5000) bootState = 4;
       } else {
         bootTimer = now;
-        handleTiltDetect();
       }
       break;
     }
 
-    case 3:
+    case 4:
       if (targetWiFi != cfg.wifi_boot) {
         cfg.wifi_boot = targetWiFi;
         saveConfig();
@@ -740,14 +743,15 @@ void updateLED() {
       return;
     }
     if (bootState == 1) {
-      if (tiltInBoot) {
-        setLed(targetWiFi ? LED_PURPLE : LED_OFF);
-      } else {
-        setLed((now % 500 < 250) ? LED_PURPLE : LED_OFF);
-      }
+      setLed(cfg.wifi_boot ? LED_BLUE : LED_WHITE);
       return;
     }
     if (bootState == 2) {
+      if (tiltInBoot) setLed(targetWiFi ? LED_PURPLE : LED_OFF);
+      else setLed((now % 500 < 250) ? LED_PURPLE : LED_OFF);
+      return;
+    }
+    if (bootState == 3) {
       setLed(targetWiFi ? LED_PURPLE : LED_OFF);
       return;
     }
