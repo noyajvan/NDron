@@ -2,10 +2,10 @@
 """MAVLink UDP Hub - forwards ESP32 MAVLink to one or more GCS"""
 import socket, select, sys, threading, time, os, signal
 
-ESP32_IP = "10.45.202.53"
+ESP32_IP = "172.24.80.237"
 ESP32_PORT = 14550
 LISTEN_PORT = 14550
-dests = []
+dests = [("100.104.253.54", 14550)]
 
 def load():
     try:

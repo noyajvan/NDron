@@ -505,6 +505,10 @@ void bridgeFCtoWiFi() {
 
 void handleTcpClients() {
   if (!wifiOn || WiFi.status() != WL_CONNECTED) return;
+
+  for (int i = 0; i < 4; i++)
+    if (tcpClients[i] && !tcpClients[i].connected()) tcpClients[i].stop();
+
   WiFiClient newCli = tcpServer.available();
   if (newCli) {
     for (int i = 0; i < 4; i++)
@@ -718,7 +722,10 @@ void mdFly() {
         autoArmTime = now;
         mdState = 2;
       } else if (now - autoArmTime > 10000) {
-        mdState = 0;
+        queue_statustext(">ARM");
+        sendMavlinkArm();
+        autoArmTime = now;
+        autoArmRetries++;
       }
       break;
 
@@ -728,7 +735,9 @@ void mdFly() {
         mdState = 0;
         queue_statustext("AUTO");
       } else if (now - autoArmTime > 10000) {
-        mdState = 0;
+        queue_statustext(">AUTO");
+        sendMavlinkSetMode(MODE_AUTO);
+        autoArmTime = now;
       }
       break;
   }
@@ -887,6 +896,8 @@ void loop() {
     last_sta_status = st;
     if (st == WL_CONNECTED) {
       staWasConnected = true;
+      for (int i = 0; i < 4; i++) { if (tcpClients[i]) tcpClients[i].stop(); }
+      tcpServer.end(); delay(50); tcpServer.begin();
       queue_statustext(String("STA IP: " + WiFi.localIP().toString()).c_str());
     } else if (st == WL_CONNECT_FAILED)
       queue_statustext("STA FAIL: check password");
