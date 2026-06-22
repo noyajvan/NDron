@@ -428,7 +428,7 @@ void bridgeFCtoWiFi() {
   size_t avail = fcAvailable();
   if (avail == 0) return;
   size_t n = min(avail, (size_t)BRIDGE_BUF_SIZE);
-  n = uart_read_bytes((uart_port_t)FC_UART_NUM, bridgeBuf, n, 0);
+  n = uart_read_bytes((uart_port_t)FC_UART_NUM, bridgeBuf, n, 1);
   if (n == 0) return;
   fc_bytes += n;
   forwardToWiFi(bridgeBuf, n);

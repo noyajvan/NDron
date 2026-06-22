@@ -78,7 +78,7 @@ while True:
                 gcs_t[addr] = now
                 if drone and (now - drone_t <= DT):
                     try:
-                        gs.sendto(data, drone)
+                        ds.sendto(data, drone)
                     except: pass
             except: pass
 
