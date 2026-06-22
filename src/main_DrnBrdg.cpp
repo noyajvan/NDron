@@ -9,7 +9,7 @@
 #include <driver/gpio.h>
 
 #define UDP_PORT         14550
-#define BRIDGE_BUF_SIZE  1024
+#define BRIDGE_BUF_SIZE  2048
 
 #define LED_PIN     48
 #define NUM_LEDS    1
@@ -39,8 +39,8 @@ struct Config {
 
 Adafruit_NeoPixel pixels(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
 #define FC_UART_NUM 0
-#define FC_RX_BUF 2048
-#define FC_TX_BUF 256
+#define FC_RX_BUF 16384
+#define FC_TX_BUF 4096
 WiFiUDP    udp;
 
 IPAddress gcsIP = DO_VPS_IP;
@@ -223,10 +223,6 @@ void fcBegin(int baud, int rx, int tx) {
 
 size_t fcAvailable() {
   size_t len; uart_get_buffered_data_len((uart_port_t)FC_UART_NUM, &len); return len;
-}
-
-uint8_t fcRead() {
-  uint8_t c; uart_read_bytes((uart_port_t)FC_UART_NUM, &c, 1, 0); return c;
 }
 
 void fcWrite(const uint8_t* d, size_t len) {
@@ -432,7 +428,8 @@ void bridgeFCtoWiFi() {
   size_t avail = fcAvailable();
   if (avail == 0) return;
   size_t n = min(avail, (size_t)BRIDGE_BUF_SIZE);
-  for (size_t i = 0; i < n; i++) bridgeBuf[i] = fcRead();
+  n = uart_read_bytes((uart_port_t)FC_UART_NUM, bridgeBuf, n, 0);
+  if (n == 0) return;
   fc_bytes += n;
   forwardToWiFi(bridgeBuf, n);
   for (size_t i = 0; i < n; i++)
