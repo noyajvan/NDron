@@ -448,11 +448,10 @@ void bridgeWiFiToFC() {
   if (sz > 0) {
     IPAddress rip = udp.remoteIP();
     uint16_t rport = udp.remotePort();
-    if (rip != IPAddress()) { gcsIP = rip; gcsPort = rport; gcsIPSet = true; }
     int n = udp.read(bridgeBuf, sizeof(bridgeBuf));
     if (n > 0) {
       fcWrite(bridgeBuf, n);
-      Serial.printf("[GCS CMD] received %d bytes from %s:%u\n", n, rip.toString().c_str(), rport);
+      Serial.printf("[GCS CMD] %d bytes from %s:%u forwarded to FC\n", n, rip.toString().c_str(), rport);
     }
   }
 }

@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
 """
 VPS UDP Relay: Drone 14550 <-> GCS 14551
-Deployed on DigitalOcean (134.209.206.127) as systemd service.
-
-Drone timeout: 10s (no packets -> Drone gone)
-GCS timeout: 120s (no heartbeat -> GCS gone)
-Drone data forwarded to ALL registered GCS.
-GCS commands forwarded to current drone only.
+Uses select() for low-latency non-blocking I/O.
 """
-import socket, sys, time
+import socket, sys, time, select
 
 DRONE_PORT = 14550
 GCS_PORT = 14551
@@ -24,14 +19,15 @@ gs = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 gs.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 gs.bind(('0.0.0.0', GCS_PORT))
 
-ds.settimeout(0.3)
-gs.settimeout(0.3)
+ds.setblocking(0)
+gs.setblocking(0)
 
 drone = None
 drone_t = 0
 gcs_list = {}
 gcs_t = {}
 last_log = 0
+pkt_count = 0
 
 def clean():
     global drone, drone_t
@@ -52,45 +48,52 @@ sys.stderr.write(f"Relay {DRONE_PORT}<->{GCS_PORT}\n"); sys.stderr.flush()
 
 while True:
     now = time.time()
-    try:
-        data, addr = ds.recvfrom(2048)
-        was_new = drone is None
-        drone = addr
-        drone_t = now
-        clean()
-        if was_new:
-            sys.stderr.write(f"Drone: {addr[0]}\n"); sys.stderr.flush()
-        for ga in list(gcs_list.keys()):
-            if now - gcs_t[ga] <= GT:
-                try:
-                    gs.sendto(data, ga)
-                except:
-                    pass
-    except socket.timeout:
-        pass
+    readable, _, _ = select.select([ds, gs], [], [], 0.01)  # 10ms poll
 
-    try:
-        data, addr = gs.recvfrom(2048)
-        now2 = time.time()
-        clean()
-        if addr not in gcs_list:
-            sys.stderr.write(f"GCS: {addr[0]}:{addr[1]}\n"); sys.stderr.flush()
-        gcs_list[addr] = True
-        gcs_t[addr] = now2
-        if drone and (now2 - drone_t <= DT):
+    for sock in readable:
+        if sock == ds:
             try:
-                gs.sendto(data, drone)
-            except:
-                pass
-    except socket.timeout:
-        pass
+                data, addr = ds.recvfrom(2048)
+                was_new = drone is None
+                drone = addr
+                drone_t = now
+                if was_new:
+                    sys.stderr.write(f"Drone: {addr[0]}\n"); sys.stderr.flush()
+                # Forward to all valid GCS
+                for ga in list(gcs_list.keys()):
+                    if now - gcs_t[ga] <= GT:
+                        try:
+                            gs.sendto(data, ga)
+                        except: pass
+                pkt_count += 1
+            except: pass
 
-    changed = clean()
+        elif sock == gs:
+            try:
+                data, addr = gs.recvfrom(2048)
+                clean()
+                if addr not in gcs_list:
+                    sys.stderr.write(f"GCS: {addr[0]}:{addr[1]}\n"); sys.stderr.flush()
+                gcs_list[addr] = True
+                gcs_t[addr] = now
+                if drone and (now - drone_t <= DT):
+                    try:
+                        gs.sendto(data, drone)
+                    except: pass
+            except: pass
 
-    if drone and now - last_log >= LOG_PERIOD:
+    if not readable:
+        clean()
+        now = time.time()
+
+    # Periodic health log
+    if now - last_log >= LOG_PERIOD:
         gcs_cnt = len([a for a in gcs_list if now - gcs_t[a] <= GT])
-        sys.stderr.write(f"alive: drone={drone[0]} gcs={gcs_cnt}\n"); sys.stderr.flush()
+        if drone:
+            sys.stderr.write(f"alive: drone={drone[0]} gcs={gcs_cnt} pkt/s={pkt_count/LOG_PERIOD:.0f}\n")
+        else:
+            sys.stderr.write(f"waiting: drone=None gcs={gcs_cnt}\n")
+        sys.stderr.flush()
+        pkt_count = 0
         last_log = now
-    if not drone and changed and now - last_log >= LOG_PERIOD:
-        sys.stderr.write(f"waiting: drone=None gcs={len(gcs_list)}\n"); sys.stderr.flush()
-        last_log = now
+
