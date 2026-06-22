@@ -1,9 +1,14 @@
 <#
 .SYNOPSIS
-    UDP relay: localhost <-> ESP32 through Tailscale
-    Run before Mission Planner: .\scripts\udp_relay.ps1
-    In MP: UDP -> Connect -> port 14551
+    OBSOLETE — replaced by VPS Python relay on DigitalOcean.
+    See scripts/udp_relay_vps.py for the current relay source.
+    VPS runs the relay as systemd service; no local script needed.
+    MP connects directly to VPS:14551 via UDPCl.
 #>
+Write-Host "OBSOLETE: Use VPS relay at 134.209.206.127:14551 instead." -ForegroundColor Yellow
+Write-Host "MP -> UDPCl -> 134.209.206.127:14551" -ForegroundColor Cyan
+exit 1
+
 param(
     [string]$EspIP = "172.24.80.53",
     [int]$EspPort = 14550,
