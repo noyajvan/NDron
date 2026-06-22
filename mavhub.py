@@ -1,82 +1,51 @@
 ﻿#!/data/data/com.termux/files/usr/bin/python3
-"""MAVLink UDP Hub - forwards ESP32 MAVLink to one or more GCS"""
-import socket, select, sys, threading, time, os, signal
+\"\"\"MAVLink UDP Forwarder — ESP32 -> ПК через телефон\"\"\"
+import socket, select
 
-ESP32_IP = "172.24.80.237"
-ESP32_PORT = 14550
+GCS_IP = \"100.104.253.54\"  # Tailscale IP ПК
+GCS_PORT = 14550
 LISTEN_PORT = 14550
-dests = [("100.104.253.54", 14550)]
-
-def load():
-    try:
-        with open(os.path.expanduser("~/.mavdests")) as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    parts = line.split()
-                    dests.append((parts[0], int(parts[1])))
-    except Exception: pass
-
-def save():
-    with open(os.path.expanduser("~/.mavdests"), "w") as f:
-        for ip, port in dests:
-            f.write(f"{ip} {port}\n")
-
-def menu():
-    while True:
-        print("\n=== MAVLink Hub ===")
-        print(f"ESP32: {ESP32_IP}:{ESP32_PORT}")
-        print(f"Destinations ({len(dests)}):")
-        for i, (ip, port) in enumerate(dests):
-            print(f"  {i+1}. {ip}:{port}")
-        print("\na <ip> <port>  - add")
-        print("d <n>          - delete")
-        print("s              - save & exit")
-        print("q              - quit")
-        cmd = input("> ").strip().split()
-        if not cmd: continue
-        if cmd[0] == "a" and len(cmd) >= 3:
-            dests.append((cmd[1], int(cmd[2])))
-            save()
-            print(f"Added {cmd[1]}:{cmd[2]}")
-        elif cmd[0] == "d" and len(cmd) >= 2:
-            n = int(cmd[1]) - 1
-            if 0 <= n < len(dests):
-                print(f"Removed {dests[n][0]}:{dests[n][1]}")
-                del dests[n]; save()
-        elif cmd[0] == "s":
-            save(); os.kill(os.getpid(), signal.SIGTERM)
-        elif cmd[0] == "q":
-            os.kill(os.getpid(), signal.SIGTERM)
 
 def main():
-    load()
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(("0.0.0.0", LISTEN_PORT))
+    sock.bind((\"0.0.0.0\", LISTEN_PORT))
     sock.setblocking(False)
-    esp_addr = (ESP32_IP, ESP32_PORT)
 
-    threading.Thread(target=menu, daemon=True).start()
-    print(f"MAVLink Hub ready. Listening 0.0.0.0:{LISTEN_PORT}")
+    esp_addr = None  # узнаём динамически
+
+    print(f\"MAVLink Forwarder ready. Listening 0.0.0.0:{LISTEN_PORT}\")
+    print(f\"Forwarding to GCS: {GCS_IP}:{GCS_PORT}\")
 
     while True:
         try:
             r = select.select([sock], [], [], 1.0)
             if r[0]:
                 data, addr = sock.recvfrom(65535)
+                if esp_addr is None:
+                    esp_addr = addr
+                    print(f\"ESP32 registered: {addr[0]}:{addr[1]}\")
                 if addr == esp_addr:
-                    for ip, port in dests:
-                        try: sock.sendto(data, (ip, port))
-                        except: pass
-                elif any(addr == (ip, port) for ip, port in dests):
-                    sock.sendto(data, esp_addr)
-                else:
-                    dests.append((addr[0], addr[1]))
-                    save()
-                    print(f"New client: {addr[0]}:{addr[1]}")
-                    sock.sendto(data, esp_addr)
-        except: break
+                    # Данные от ESP32 -> шлём на ПК
+                    try:
+                        sock.sendto(data, (GCS_IP, GCS_PORT))
+                    except Exception as e:
+                        print(f\"Send to GCS failed: {e}\")
+                elif addr == (GCS_IP, GCS_PORT) and esp_addr:
+                    # Команда от ПК -> шлём на ESP32
+                    try:
+                        sock.sendto(data, esp_addr)
+                    except Exception as e:
+                        print(f\"Send to ESP32 failed: {e}\")
+                elif addr[0] != GCS_IP:
+                    # Неизвестный — считаем ESP32
+                    print(f\"New source: {addr[0]}:{addr[1]}\")
+                    esp_addr = addr
+        except KeyboardInterrupt:
+            break
+        except Exception:
+            pass
+    sock.close()
 
-if __name__ == "__main__":
+if __name__ == \"__main__\":
     main()

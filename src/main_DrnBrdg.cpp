@@ -9,7 +9,6 @@
 #include <driver/gpio.h>
 
 #define UDP_PORT         14550
-#define MAX_UDP_CLIENTS  8
 #define BRIDGE_BUF_SIZE  1024
 
 #define LED_PIN     48
@@ -24,31 +23,30 @@
 #define LED_BLUE    0x0000FF
 #define BOOT_BTN    0
 
-#define SYS_ID          1
+// cfg.sys_id now configurable via cfg.sys_id (NVS) — use terminal: SYSID=N + SAVE
 #define COMP_ID         MAV_COMP_ID_ONBOARD_COMPUTER
 #define TAKEOFF_MODE    13
 
-// РњР°РєСЃРёРјР°Р»СЊРЅР° РєС–Р»СЊРєС–СЃС‚СЊ СЃС‚Р°С‚РёС‡РЅРёС… Tailscale РЅР°Р·РµРјРѕРє
-#define MAX_STATIONS 5
+#define DO_VPS_IP IPAddress(134, 209, 206, 127)
 
 struct Config {
   char     sta_ssid[32]  = "LEO";
   char     sta_pass[64]  = "88888888";
   uint32_t baud          = 921600;
-  String   stations[MAX_STATIONS] = {"100.104.253.54", "", "", "", ""};
-  int      current_station_count = 1;
-  uint8_t  wifi_boot       = 1;
+  uint8_t  wifi_boot     = 1;
+  uint8_t  sys_id        = 1;
 } cfg;
-
-unsigned long stationFailTime[MAX_STATIONS] = {0};
 
 Adafruit_NeoPixel pixels(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
 #define FC_UART_NUM 0
 #define FC_RX_BUF 2048
 #define FC_TX_BUF 256
 WiFiUDP    udp;
-WiFiServer tcpServer(5760);
-WiFiClient tcpClients[4];
+
+IPAddress gcsIP = DO_VPS_IP;
+uint16_t gcsPort = UDP_PORT;
+bool     gcsIPSet = true;
+
 
 bool wifiOn = false;
 bool wifiActivating = false;
@@ -57,8 +55,6 @@ uint8_t staRetryCount = 0;
 bool staWasConnected = false;
 
 // Р‘СѓС„РµСЂ РґР»СЏ РґРёРЅР°РјС–С‡РЅРёС… РєР»С–С”РЅС‚С–РІ (СЏРєС– СЃР°РјС– РЅР°РґС–СЃР»Р°Р»Рё РїР°РєРµС‚)
-struct { IPAddress ip; uint16_t port; bool active; } udpClients[MAX_UDP_CLIENTS];
-bool gsConnected = false;
 
 mavlink_message_t mavMsg;
 mavlink_status_t  mavStatus;
@@ -77,8 +73,8 @@ bool     acro_stop = false;
 bool     takeoff_detected = false;
 bool     takeoff_mode_detected = false;
 
-unsigned long start_time = 0, last_request = 0, state_entry = 0, retry_time = 0;
-unsigned long last_radio_status = 0, last_wifi_hb = 0, last_serial_log = 0, last_sta_reconnect = 0;
+unsigned long start_time = 0, last_request = 0, state_entry = 0, retry_time = 0,
+              last_wifi_hb = 0, last_serial_log = 0, last_sta_reconnect = 0;
 int last_sta_status = -1;
 uint32_t fc_bytes = 0, fc_msgs = 0;
 bool     missionFirstParsed = false;
@@ -129,18 +125,14 @@ void loadConfig() {
   p.begin("dbridge", true);
   p.getString("sta_ssid", cfg.sta_ssid, sizeof(cfg.sta_ssid));
   p.getString("sta_pass", cfg.sta_pass, sizeof(cfg.sta_pass));
-  cfg.baud    = p.getUInt("baud", 921600);
-  
-  cfg.current_station_count = p.getInt("st_count", 1);
+  cfg.baud     = p.getUInt("baud", 921600);
   cfg.wifi_boot = p.getUInt("wifi_boot", 1);
-  for (int i = 0; i < cfg.current_station_count; i++) {
-    String key = "ip_" + String(i);
-    cfg.stations[i] = p.getString(key.c_str(), "");
-  }
+  cfg.sys_id    = p.getUInt("sys_id", 1);
   p.end();
-  
-  Serial.printf("NVS LOADED: sta_ssid=%s, baud=%u, stations=%d, wifi_boot=%u\n", cfg.sta_ssid, cfg.baud, cfg.current_station_count, cfg.wifi_boot);
+
+  Serial.printf("NVS LOADED: sta_ssid=%s, baud=%u, wifi_boot=%u, sys_id=%u\n", cfg.sta_ssid, cfg.baud, cfg.wifi_boot, cfg.sys_id);
 }
+
 
 void saveConfig() {
   Preferences p;
@@ -148,16 +140,12 @@ void saveConfig() {
   p.putString("sta_ssid", cfg.sta_ssid);
   p.putString("sta_pass", cfg.sta_pass);
   p.putUInt("baud",      cfg.baud);
-  
-  p.putInt("st_count", cfg.current_station_count);
-  for (int i = 0; i < cfg.current_station_count; i++) {
-    String key = "ip_" + String(i);
-    p.putString(key.c_str(), cfg.stations[i]);
-  }
   p.putUInt("wifi_boot", cfg.wifi_boot);
+  p.putUInt("sys_id",    cfg.sys_id);
   p.end();
-  Serial.printf("NVS SAVED: sta_ssid=%s, baud=%u, stations=%d, wifi_boot=%u\n", cfg.sta_ssid, cfg.baud, cfg.current_station_count, cfg.wifi_boot);
+  Serial.printf("NVS SAVED: sta_ssid=%s, baud=%u, wifi_boot=%u, sys_id=%u\n", cfg.sta_ssid, cfg.baud, cfg.wifi_boot, cfg.sys_id);
 }
+
 
 void send_statustext(const char* text);
 void queue_statustext(const char* text);
@@ -188,7 +176,7 @@ void wifiActivate() {
   WiFi.mode(WIFI_STA);
   delay(50);
   WiFi.setTxPower(WIFI_POWER_8_5dBm);
-  WiFi.setSleep(WIFI_PS_MIN_MODEM);
+  WiFi.setSleep(WIFI_PS_NONE);
   
   if (strlen(cfg.sta_ssid) > 0) {
     WiFi.begin(cfg.sta_ssid, cfg.sta_pass);
@@ -200,8 +188,8 @@ void wifiActivate() {
     Serial.println("STA SSID is empty. Use terminal to set it.");
   }
   
-  tcpServer.begin();
   udp.begin(UDP_PORT);
+
   queue_statustext("WiFi ON");
 }
 
@@ -212,12 +200,8 @@ void wifiDeactivate() {
   staRetryCount = 0;
   staWasConnected = false;
   
-  for (int i = 0; i < 4; i++) {
-    if (tcpClients[i]) tcpClients[i].stop();
-  }
-  tcpServer.end();
   udp.stop();
-  
+
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
   Serial.println("WiFi OFF (Radio Disabled)");
@@ -251,45 +235,17 @@ void fcWrite(const uint8_t* d, size_t len) {
 
 void sendToFC(const uint8_t* data, uint16_t len) { fcWrite(data, len); }
 
+// Otvechaem na IP otpravitelya (sohranyaetsya pri poluchenii paketa).
+// S relay — telefonniy NAT ne meshaet, potomu chto relay prorabotal
+// soedinenie v obe storony.
 void forwardToWiFi(const uint8_t* data, size_t len) {
   if (!wifiOn || WiFi.status() != WL_CONNECTED) return;
-  
-  // 1. РџР°СЂР°Р»РµР»СЊРЅРµ РЅР°РґСЃРёР»Р°РЅРЅСЏ РЅР° РІСЃС– РІРІРµРґРµРЅС– Tailscale РЅР°Р·РµРјРєРё Р· С‚РµСЂРјС–РЅР°Р»Сѓ
-  if (cfg.current_station_count > 0) {
-    unsigned long now = millis();
-    for (int i = 0; i < cfg.current_station_count; i++) {
-      if (cfg.stations[i].length() == 0) continue;
-      if (stationFailTime[i] && now - stationFailTime[i] < 10000) continue;
-      udp.beginPacket(cfg.stations[i].c_str(), UDP_PORT);
-      udp.write(data, len);
-      if (!udp.endPacket()) stationFailTime[i] = now;
-    }
-  }
-
-  // 2. РќР°РґСЃРёР»Р°РЅРЅСЏ РЅР° РґРёРЅР°РјС–С‡РЅС– UDP РєР»С–С”РЅС‚Рё (СЏРєС‰Рѕ Р·'СЏРІРёС‚СЊСЃСЏ СЃС‚РѕСЂРѕРЅРЅС–Р№ РїСЂРёСЃС‚СЂС–Р№ РІСЃРµСЂРµРґРёРЅС– Р»РѕРєР°Р»СЊРЅРѕС— РїС–РґРјРµСЂРµР¶С– СЂРѕСѓС‚РµСЂР°)
-  for (int i = 0; i < MAX_UDP_CLIENTS; i++) {
-    if (udpClients[i].active) {
-      udp.beginPacket(udpClients[i].ip, udpClients[i].port);
-      udp.write(data, len);
-      udp.endPacket();
-    }
-  }
-
-  // 3. РќР°РґСЃРёР»Р°РЅРЅСЏ РЅР° TCP РєР»С–С”РЅС‚С–РІ (СЏРєС‰Рѕ РІРёРєРѕСЂРёСЃС‚РѕРІСѓСЋС‚СЊСЃСЏ)
-  for (int i = 0; i < 4; i++) {
-    if (tcpClients[i] && tcpClients[i].connected()) {
-      tcpClients[i].write(data, len);
-      tcpClients[i].flush();
-    }
-  }
-
-  IPAddress gw = WiFi.gatewayIP();
-  if (gw != IPAddress(0,0,0,0)) {
-    udp.beginPacket(gw, UDP_PORT); udp.write(data, len); udp.endPacket();
-  }
-  IPAddress bcast = IPAddress((uint32_t)WiFi.localIP() | ~(uint32_t)WiFi.subnetMask());
-  udp.beginPacket(bcast, UDP_PORT); udp.write(data, len); udp.endPacket();
+  if (!gcsIPSet) return;
+  udp.beginPacket(gcsIP, gcsPort);
+  udp.write(data, len);
+  udp.endPacket();
 }
+
 
 void sendToBoth(const uint8_t* data, uint16_t len) {
   fcWrite(data, len);
@@ -297,7 +253,7 @@ void sendToBoth(const uint8_t* data, uint16_t len) {
 }
 
 void send_statustext(const char* text) {
-  mavlink_msg_statustext_pack(SYS_ID, COMP_ID, &txMsg, MAV_SEVERITY_INFO, text, 0, 0);
+  mavlink_msg_statustext_pack(cfg.sys_id, COMP_ID, &txMsg, MAV_SEVERITY_INFO, text, 0, 0);
   uint16_t len = mavlink_msg_to_send_buffer(txBuf, &txMsg);
   fcWrite(txBuf, len);
 }
@@ -312,7 +268,7 @@ void queue_statustext(const char* text) {
 
 void send_queued_statustext() {
   for (int i = 0; i < 5 && q_read != q_write; i++) {
-    mavlink_msg_statustext_pack(SYS_ID, COMP_ID, &txMsg,
+    mavlink_msg_statustext_pack(cfg.sys_id, COMP_ID, &txMsg,
                                 MAV_SEVERITY_INFO, status_queue[q_read], 0, 0);
     uint16_t len = mavlink_msg_to_send_buffer(txBuf, &txMsg);
     sendToBoth(txBuf, len);
@@ -321,34 +277,26 @@ void send_queued_statustext() {
 }
 
 void send_heartbeat() {
-  mavlink_msg_heartbeat_pack(SYS_ID, COMP_ID, &txMsg, MAV_TYPE_ONBOARD_CONTROLLER, MAV_AUTOPILOT_INVALID, 0, 0, 0);
+  mavlink_msg_heartbeat_pack(cfg.sys_id, COMP_ID, &txMsg, MAV_TYPE_ONBOARD_CONTROLLER, MAV_AUTOPILOT_INVALID, 0, 0, 0);
   uint16_t len = mavlink_msg_to_send_buffer(txBuf, &txMsg);
   fcWrite(txBuf, len);
 }
 
-void send_radio_status() {
-  if (!wifiOn || WiFi.status() != WL_CONNECTED) return;
-  uint8_t rssi = (WiFi.status() == WL_CONNECTED) ? 70 : 0;
-  mavlink_msg_radio_status_pack(SYS_ID, COMP_ID, &txMsg, rssi, 0, 0, 0, 0, 0, 0);
-  uint16_t len = mavlink_msg_to_send_buffer(txBuf, &txMsg);
-  forwardToWiFi(txBuf, len);
-}
-
 void send_mission_request_list() {
-  mavlink_msg_mission_request_list_pack(SYS_ID, COMP_ID, &txMsg, 1, MAV_COMP_ID_AUTOPILOT1, MAV_MISSION_TYPE_MISSION);
+  mavlink_msg_mission_request_list_pack(cfg.sys_id, COMP_ID, &txMsg, 1, MAV_COMP_ID_AUTOPILOT1, MAV_MISSION_TYPE_MISSION);
   uint16_t len = mavlink_msg_to_send_buffer(txBuf, &txMsg);
   fcWrite(txBuf, len);
 }
 
 void send_mission_request_int(uint16_t seq) {
-  mavlink_msg_mission_request_int_pack(SYS_ID, COMP_ID, &txMsg, 1, MAV_COMP_ID_AUTOPILOT1, seq, MAV_MISSION_TYPE_MISSION);
+  mavlink_msg_mission_request_int_pack(cfg.sys_id, COMP_ID, &txMsg, 1, MAV_COMP_ID_AUTOPILOT1, seq, MAV_MISSION_TYPE_MISSION);
   uint16_t len = mavlink_msg_to_send_buffer(txBuf, &txMsg);
   fcWrite(txBuf, len);
 }
 
 void sendMavlinkForceDisarm() {
   mavlink_message_t msg; uint8_t buf[MAVLINK_MAX_PACKET_LEN];
-  mavlink_msg_command_long_pack(SYS_ID, COMP_ID, &msg, 1, MAV_COMP_ID_AUTOPILOT1,
+  mavlink_msg_command_long_pack(cfg.sys_id, COMP_ID, &msg, 1, MAV_COMP_ID_AUTOPILOT1,
     MAV_CMD_COMPONENT_ARM_DISARM, 0, 0.0f, 21196.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
   uint16_t len = mavlink_msg_to_send_buffer(buf, &msg); fcWrite(buf, len);
   Serial.println("[FAILSAFE] DISARM");
@@ -356,7 +304,7 @@ void sendMavlinkForceDisarm() {
 
 void sendMavlinkSetRelay() {
   mavlink_message_t msg; uint8_t buf[MAVLINK_MAX_PACKET_LEN];
-  mavlink_msg_command_long_pack(SYS_ID, COMP_ID, &msg, 1, MAV_COMP_ID_AUTOPILOT1,
+  mavlink_msg_command_long_pack(cfg.sys_id, COMP_ID, &msg, 1, MAV_COMP_ID_AUTOPILOT1,
     MAV_CMD_DO_SET_RELAY, 0, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
   uint16_t len = mavlink_msg_to_send_buffer(buf, &msg); fcWrite(buf, len);
   Serial.println("[FAILSAFE] RELAY");
@@ -365,7 +313,7 @@ void sendMavlinkSetRelay() {
 
 void sendMavlinkArm() {
   mavlink_message_t msg; uint8_t buf[MAVLINK_MAX_PACKET_LEN];
-  mavlink_msg_command_long_pack(SYS_ID, COMP_ID, &msg, 1, MAV_COMP_ID_AUTOPILOT1,
+  mavlink_msg_command_long_pack(cfg.sys_id, COMP_ID, &msg, 1, MAV_COMP_ID_AUTOPILOT1,
     MAV_CMD_COMPONENT_ARM_DISARM, 0, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
   uint16_t len = mavlink_msg_to_send_buffer(buf, &msg); fcWrite(buf, len);
   Serial.println("[AUTO-ARM] Sent");
@@ -373,7 +321,7 @@ void sendMavlinkArm() {
 
 void sendMavlinkSetMode(uint8_t mode) {
   mavlink_message_t msg; uint8_t buf[MAVLINK_MAX_PACKET_LEN];
-  mavlink_msg_command_long_pack(SYS_ID, COMP_ID, &msg, 1, MAV_COMP_ID_AUTOPILOT1,
+  mavlink_msg_command_long_pack(cfg.sys_id, COMP_ID, &msg, 1, MAV_COMP_ID_AUTOPILOT1,
     MAV_CMD_DO_SET_MODE, 0, MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, mode, 0, 0, 0, 0, 0);
   uint16_t len = mavlink_msg_to_send_buffer(buf, &msg); fcWrite(buf, len);
   Serial.printf("[AUTO-MODE] Set mode %d\n", mode);
@@ -392,10 +340,10 @@ void handle_mavlink_message(mavlink_message_t* msg) {
       heartbeat_received = true;
       static bool first_hb = false;
       if (!first_hb) { first_hb = true; queue_statustext("Mavlink OK");
-        mavlink_msg_command_long_pack(SYS_ID, COMP_ID, &txMsg, 1, MAV_COMP_ID_AUTOPILOT1,
+        mavlink_msg_command_long_pack(cfg.sys_id, COMP_ID, &txMsg, 1, MAV_COMP_ID_AUTOPILOT1,
           MAV_CMD_SET_MESSAGE_INTERVAL, 0, MAVLINK_MSG_ID_ATTITUDE, 100000, 0, 0, 0, 0, 0);
         uint16_t l = mavlink_msg_to_send_buffer(txBuf, &txMsg); fcWrite(txBuf, l);
-        mavlink_msg_command_long_pack(SYS_ID, COMP_ID, &txMsg, 1, MAV_COMP_ID_AUTOPILOT1,
+        mavlink_msg_command_long_pack(cfg.sys_id, COMP_ID, &txMsg, 1, MAV_COMP_ID_AUTOPILOT1,
           MAV_CMD_SET_MESSAGE_INTERVAL, 0, MAVLINK_MSG_ID_RAW_IMU, 100000, 0, 0, 0, 0, 0);
         l = mavlink_msg_to_send_buffer(txBuf, &txMsg); fcWrite(txBuf, l); }
       current_custom_mode = hb.custom_mode;
@@ -478,16 +426,7 @@ void handle_mavlink_message(mavlink_message_t* msg) {
   }
 }
 
-void addUdpClient(IPAddress ip, uint16_t port) {
-  for (int i = 0; i < MAX_UDP_CLIENTS; i++)
-    if (udpClients[i].active && udpClients[i].ip == ip && udpClients[i].port == port) return;
-  for (int i = 0; i < MAX_UDP_CLIENTS; i++)
-    if (!udpClients[i].active) {
-      udpClients[i].ip = ip; udpClients[i].port = port; udpClients[i].active = true;
-      gsConnected = true;
-      return;
-    }
-}
+
 
 void bridgeFCtoWiFi() {
   size_t avail = fcAvailable();
@@ -503,45 +442,21 @@ void bridgeFCtoWiFi() {
     }
 }
 
-void handleTcpClients() {
-  if (!wifiOn || WiFi.status() != WL_CONNECTED) return;
-
-  for (int i = 0; i < 4; i++)
-    if (tcpClients[i] && !tcpClients[i].connected()) tcpClients[i].stop();
-
-  WiFiClient newCli = tcpServer.available();
-  if (newCli) {
-    for (int i = 0; i < 4; i++)
-      if (!tcpClients[i] || !tcpClients[i].connected()) {
-        tcpClients[i] = newCli;
-        break;
-      }
-  }
-  for (int i = 0; i < 4; i++)
-    if (tcpClients[i] && tcpClients[i].connected() && tcpClients[i].available()) {
-      int n = tcpClients[i].read(bridgeBuf, BRIDGE_BUF_SIZE);
-      if (n > 0) fcWrite(bridgeBuf, n);
-    }
-}
-
-// РџСЂРёР№РѕРј РґР°РЅРёС…: Р±СѓРґСЊ-СЏРєР° Tailscale РЅР°Р·РµРјРєР° РїРµСЂРµРґР°С” РєРѕРјР°РЅРґРё РЅР° РґСЂРѕРЅ
 void bridgeWiFiToFC() {
   if (!wifiOn || WiFi.status() != WL_CONNECTED) return;
   int sz = udp.parsePacket();
   if (sz > 0) {
+    IPAddress rip = udp.remoteIP();
+    uint16_t rport = udp.remotePort();
+    if (rip != IPAddress()) { gcsIP = rip; gcsPort = rport; gcsIPSet = true; }
     int n = udp.read(bridgeBuf, sizeof(bridgeBuf));
-    if (n > 0) { 
-      fcWrite(bridgeBuf, n); 
-      
-      // Р›РѕРіСѓС”РјРѕ РІ С‚РµСЂРјС–РЅР°Р», Р· СЏРєРѕС— СЃР°РјРµ Tailscale-РЅР°Р·РµРјРєРё РїСЂРёР»РµС‚С–Р»Р° РєРѕРјР°РЅРґР°
-      IPAddress remoteIP = udp.remoteIP();
-      Serial.printf("[GCS CMD] received %d bytes from Tailscale IP: %s\n", n, remoteIP.toString().c_str());
-      
-      // РўР°РєРѕР¶ СЂРµС”СЃС‚СЂСѓС”РјРѕ Р°РґСЂРµСЃСѓ РІ РїСѓР» РґРёРЅР°РјС–С‡РЅРёС… РІС–РґРїРѕРІС–РґРµР№
-      addUdpClient(remoteIP, udp.remotePort()); 
+    if (n > 0) {
+      fcWrite(bridgeBuf, n);
+      Serial.printf("[GCS CMD] received %d bytes from %s:%u\n", n, rip.toString().c_str(), rport);
     }
   }
 }
+
 
 void handleTerminalConfig() {
   while (Serial.available() > 0) {
@@ -557,10 +472,8 @@ void handleTerminalConfig() {
           Serial.printf("IP Address: %s\n", WiFi.localIP().toString().c_str());
           Serial.printf("Config SSID: %s\n", cfg.sta_ssid);
           Serial.printf("Config UART Baud: %u\n", cfg.baud);
-          Serial.printf("Static GCS Tailscale Stations: %d / %d\n", cfg.current_station_count, MAX_STATIONS);
-          for (int i = 0; i < cfg.current_station_count; i++) {
-            Serial.printf("  [%d] %s\n", i, cfg.stations[i].c_str());
-          }
+          Serial.printf("Auto WiFi at boot: %s\n", cfg.wifi_boot ? "ON" : "OFF");
+          Serial.printf("SYS_ID: %u\n", cfg.sys_id);
           Serial.println("----------------------");
         } 
         else if (inputBuffer.startsWith("SSID=")) {
@@ -581,17 +494,6 @@ void handleTerminalConfig() {
           } else {
             Serial.println("Invalid Baudrate!");
           }
-        } 
-        else if (inputBuffer.startsWith("ADD_IP=")) {
-          String ip = inputBuffer.substring(7);
-          ip.trim();
-          if (cfg.current_station_count < MAX_STATIONS) {
-            cfg.stations[cfg.current_station_count] = ip;
-            cfg.current_station_count++;
-            Serial.printf("SUCCESS: Added static Tailscale GCS: %s. (Type 'SAVE' to store)\n", ip.c_str());
-          } else {
-            Serial.println("ERROR: Limit of maximum 5 stations reached!");
-          }
         }
         else if (inputBuffer.equalsIgnoreCase("WIFI=1")) {
           if (!wifiOn) wifiActivate();
@@ -611,10 +513,14 @@ void handleTerminalConfig() {
           sendMavlinkForceDisarm();
           Serial.println("DISARM sent to FC");
         }
-        else if (inputBuffer.equalsIgnoreCase("CLEAR")) {
-          cfg.current_station_count = 0;
-          for(int i = 0; i < MAX_STATIONS; i++) cfg.stations[i] = "";
-          Serial.println("SUCCESS: Tailscale station list cleared. (Type 'SAVE' to store)");
+        else if (inputBuffer.startsWith("SYSID=")) {
+          uint8_t sid = inputBuffer.substring(6).toInt();
+          if (sid >= 1 && sid <= 255) {
+            cfg.sys_id = sid;
+            Serial.printf("Set SYS_ID to: %u (Type 'SAVE' to store)\n", cfg.sys_id);
+          } else {
+            Serial.println("Invalid SYS_ID (1-255)");
+          }
         }
         else if (inputBuffer.equalsIgnoreCase("SAVE")) {
           saveConfig();
@@ -623,7 +529,7 @@ void handleTerminalConfig() {
           ESP.restart();
         } 
         else {
-          Serial.printf("Unknown command: %s. Available: STATUS, SSID=xxx, PASS=xxx, BAUD=xxx, ADD_IP=x.x.x.x, WIFI=1, WIFI=0, CLEAR, SAVE\n", inputBuffer.c_str());
+          Serial.printf("Unknown command: %s. Available: STATUS, SSID=xxx, PASS=xxx, BAUD=xxx, SYSID=N, WIFI=1, WIFI=0, RELAY, DISARM, SAVE\n", inputBuffer.c_str());
         }
         inputBuffer = "";
       }
@@ -684,12 +590,9 @@ void bootSequence() {
     }
 
     case 4:
-      if (targetWiFi != cfg.wifi_boot) {
-        cfg.wifi_boot = targetWiFi;
-        saveConfig();
-      }
-      if (cfg.wifi_boot && !wifiOn) wifiActivate();
-      if (!cfg.wifi_boot && wifiOn) wifiDeactivate();
+      // Tilt-override temparary — ne sohranyaem v NVS
+      if (targetWiFi && !wifiOn) wifiActivate();
+      if (!targetWiFi && wifiOn) wifiDeactivate();
       bootDone = true;
       break;
   }
@@ -797,9 +700,9 @@ void setup() {
   if (cfg.wifi_boot) wifiActivate();
   
   start_time = millis();
-  Serial.println("\n=== ESP32-S3 DropCtrlV3 Tailscale Ready ===");
+   Serial.println("\n=== ESP32-S3 DropCtrlV3 VPS Relay Ready ===");
   Serial.println("Terminal configuration active. Type 'STATUS' for info.");
-  queue_statustext("ESP32-S3 Tailscale Ready");
+  queue_statustext("ESP32-S3 WiFi Bridge Ready");
 }
 
 void loop() {
@@ -814,14 +717,12 @@ void loop() {
   handleTerminalConfig();
 
   if (wifiOn) {
-    handleTcpClients();
     bridgeWiFiToFC();
   }
   bridgeFCtoWiFi();
 
   unsigned long now = millis();
   if (now - last_wifi_hb >= 1000)       { send_heartbeat(); send_queued_statustext(); last_wifi_hb = now; }
-  if (now - last_radio_status >= 2000)  { send_radio_status(); last_radio_status = now; }
 
   static unsigned long lastBootPress = 0;
   if (!digitalRead(BOOT_BTN) && now - lastBootPress > 500) {
@@ -868,8 +769,9 @@ void loop() {
     staWasConnected = true;
     Serial.printf("STA Connected successfully! IP: %s\n", WiFi.localIP().toString().c_str());
     queue_statustext("WiFi STA OK");
-    switchToSmartStaticIP();
   }
+
+
 
   if (wifiActivating && now - wifiActivateTime > 20000) {
     staRetryCount++;
@@ -896,8 +798,6 @@ void loop() {
     last_sta_status = st;
     if (st == WL_CONNECTED) {
       staWasConnected = true;
-      for (int i = 0; i < 4; i++) { if (tcpClients[i]) tcpClients[i].stop(); }
-      tcpServer.end(); delay(50); tcpServer.begin();
       queue_statustext(String("STA IP: " + WiFi.localIP().toString()).c_str());
     } else if (st == WL_CONNECT_FAILED)
       queue_statustext("STA FAIL: check password");
