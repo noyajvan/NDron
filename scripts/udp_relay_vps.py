@@ -3,12 +3,13 @@
 VPS UDP Relay: Drone 14550 <-> GCS 14551
 Uses select() for low-latency non-blocking I/O.
 """
-import socket, sys, time, select
+import socket, sys, time, select, threading
 
 DRONE_PORT = 14550
 GCS_PORT = 14551
-DT = 10       # Drone timeout: 10s
-GT = 120      # GCS timeout: 120s
+CMD_PORT = 14552
+DT = 60       # Drone timeout: 60s
+GT = 300      # GCS timeout: 300s
 LOG_PERIOD = 60  # Health log every 60s
 
 ds = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -43,6 +44,30 @@ def clean():
         sys.stderr.write("GCS gone\n"); sys.stderr.flush()
         changed = True
     return changed
+
+def tcp_cmd_server():
+    """TCP server on CMD_PORT – forwards lines to drone via UDP."""
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(('0.0.0.0', CMD_PORT))
+    srv.listen(5)
+    srv.settimeout(1.0)
+    sys.stderr.write(f"CMD TCP:{CMD_PORT}\n"); sys.stderr.flush()
+    while True:
+        try:
+            conn, addr = srv.accept()
+            conn.settimeout(5.0)
+            sys.stderr.write(f"CMD conn {addr[0]}\n"); sys.stderr.flush()
+            try:
+                data = conn.recv(4096)
+                if data and drone:
+                    ds.sendto(data.strip(), drone)
+                    sys.stderr.write(f"CMD fwd {len(data)}B\n"); sys.stderr.flush()
+            except: pass
+            conn.close()
+        except: pass
+
+threading.Thread(target=tcp_cmd_server, daemon=True).start()
 
 sys.stderr.write(f"Relay {DRONE_PORT}<->{GCS_PORT}\n"); sys.stderr.flush()
 

@@ -3,32 +3,79 @@
 #include <WiFiUdp.h>
 #include <Preferences.h>
 
-#include <common/mavlink.h>
+#include <ardupilotmega/mavlink.h>
 #include <Adafruit_NeoPixel.h>
 #include <driver/uart.h>
 #include <driver/gpio.h>
 
-#define UDP_PORT         14550
-#define BRIDGE_BUF_SIZE  2048
+// ============================================================
+//                      ПІНИ ТА КОНСТАНТИ
+// ============================================================
+#define LED_PIN         48
+#define NUM_LEDS        1
+#define BOOT_BTN        0
+#define FC_UART_NUM     0
+#define FC_RX_BUF       16384
+#define FC_TX_BUF       4096
+#define BRIDGE_BUF_SIZE 2048
+#define UDP_PORT        14550
 
-#define LED_PIN     48
-#define NUM_LEDS    1
+// --- Кольори RGB (NeoPixel GRB) ---
+#define LED_OFF         0x000000
+#define LED_WHITE       0xFFFFFF
+#define LED_CYAN        0x00FFFF   // ГОЛУБОЙ
+#define LED_BLUE        0x0000FF   // СИНИЙ
+#define LED_PALE_LILAC  0xCC99FF   // БЛЕДНО-СИРЕНЕВЫЙ
+#define LED_LILAC       0x8000FF   // СИРЕНЕВЫЙ
+#define LED_PURPLE      0x800080   // ФИОЛЕТОВЫЙ
+#define LED_MAGENTA     0xFF00FF   // ЯРКО-РОЗОВЫЙ
+#define LED_YELLOW      0xFFFF00   // ЖЕЛТЫЙ
+#define LED_ORANGE      0xFFA500   // ОРАНЖЕВЫЙ
+#define LED_GREEN       0x00FF00   // ЗЕЛЕНЫЙ
+#define LED_RED         0xFF0000   // КРАСНЫЙ
+#define LED_CHERRY_D    0xFF0040   // ТЕМНО-ВИШНЕВЫЙ
+#define LED_CHERRY_L    0xFF4080   // СВЕТЛО-ВИШНЕВЫЙ
 
-#define LED_OFF     0x000000
-#define LED_WHITE   0xFFFFFF
-#define LED_GREEN   0x00FF00
-#define LED_PURPLE  0xFF00FF
-#define LED_RED     0xFF0000
-#define LED_ORANGE  0xFFA500
-#define LED_BLUE    0x0000FF
-#define BOOT_BTN    0
+// --- EKF флаги ---
+#define EKF_ATTITUDE           0x01
 
-// cfg.sys_id now configurable via cfg.sys_id (NVS) — use terminal: SYSID=N + SAVE
+// --- MAVLink ---
 #define COMP_ID         MAV_COMP_ID_ONBOARD_COMPUTER
-#define TAKEOFF_MODE    13
+#define MODE_STABILIZE  0
+#define MODE_AUTO       3
 
-#define DO_VPS_IP IPAddress(134, 209, 206, 127)
+// --- Таймаути (мс) ---
+#define WIFI_TIMEOUT_MS         60000
+#define ARM_RETRY_INTERVAL_MS   5000
+#define MODE_RETRY_INTERVAL_MS  10000
+#define REASON_REPORT_MS        30000
 
+// --- Команди ArduPilot (якщо не визначені в заголовках) ---
+#ifndef MAV_CMD_DO_START_MAG_CAL
+#define MAV_CMD_DO_START_MAG_CAL 42424
+#endif
+
+// ============================================================
+//                     СТАНИ МАШИНИ (FSM)
+// ============================================================
+enum SystemState : uint8_t {
+  STATE_INIT_WIFI       = 1,
+  STATE_INIT_MAVLINK    = 2,
+  STATE_MAG_ERROR       = 3,
+  STATE_MAG_OK          = 4,
+  STATE_CALIBRATION     = 5,
+  STATE_CALIBRATION_END = 6,
+  STATE_NO_ARM          = 7,
+  STATE_ARMING          = 8,
+  STATE_ARMED           = 9,
+  STATE_START_MISSION   = 10,
+  STATE_MISSION         = 11,
+  STATE_RELAY_CONTROL   = 12
+};
+
+// ============================================================
+//                    КОНФІГУРАЦІЯ
+// ============================================================
 struct Config {
   char     sta_ssid[32]  = "LEO";
   char     sta_pass[64]  = "88888888";
@@ -37,182 +84,218 @@ struct Config {
   uint8_t  sys_id        = 1;
 } cfg;
 
+// ============================================================
+//                   ГЛОБАЛЬНІ ОБ'ЄКТИ
+// ============================================================
 Adafruit_NeoPixel pixels(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
-#define FC_UART_NUM 0
-#define FC_RX_BUF 16384
-#define FC_TX_BUF 4096
-WiFiUDP    udp;
-
-IPAddress gcsIP = DO_VPS_IP;
+WiFiUDP udp;
+IPAddress gcsIP = IPAddress(134, 209, 206, 127);
 uint16_t gcsPort = UDP_PORT;
-bool     gcsIPSet = true;
+bool gcsIPSet = true;
 
+// --- Глобальні змінні зв'язку ---
+bool hasWifi = false;
+bool hasServer = false;
+int  mdfly  = 0;
 
+// --- WiFi ---
 bool wifiOn = false;
 bool wifiActivating = false;
-unsigned long wifiActivateTime = 0;
-uint8_t staRetryCount = 0;
+uint8_t wifiTryIdx = 0;
+unsigned long wifiTryStart = 0;
 bool staWasConnected = false;
+int last_sta_status = -1;
 
-// Р‘СѓС„РµСЂ РґР»СЏ РґРёРЅР°РјС–С‡РЅРёС… РєР»С–С”РЅС‚С–РІ (СЏРєС– СЃР°РјС– РЅР°РґС–СЃР»Р°Р»Рё РїР°РєРµС‚)
-
+// --- MAVLink буфери ---
 mavlink_message_t mavMsg;
 mavlink_status_t  mavStatus;
-uint8_t           bridgeBuf[BRIDGE_BUF_SIZE];
+uint8_t bridgeBuf[BRIDGE_BUF_SIZE];
 mavlink_message_t txMsg;
-uint8_t           txBuf[MAVLINK_MAX_PACKET_LEN];
+uint8_t txBuf[MAVLINK_MAX_PACKET_LEN];
 
-struct Point { int32_t lat=0; int32_t lon=0; bool relay=false; bool received=false; };
-Point pTg;
-
-uint16_t mission_count = 0;
-bool     mission_loaded = false, heartbeat_received = false;
+// --- Стан польотного контролера ---
+SystemState state = STATE_INIT_WIFI;
+bool heartbeat_received = false;
 uint32_t current_custom_mode = 0;
-bool     is_armed = false;
-bool     acro_stop = false;
-bool     takeoff_detected = false;
-bool     takeoff_mode_detected = false;
-
-unsigned long start_time = 0, last_request = 0, state_entry = 0, retry_time = 0,
-              last_wifi_hb = 0, last_serial_log = 0, last_sta_reconnect = 0;
-int last_sta_status = -1;
-uint32_t fc_bytes = 0, fc_msgs = 0;
-bool     missionFirstParsed = false;
-unsigned long lastMissionReq = 0;
-unsigned long lastMissionScan = 0;
-
-// Crash detection & failsafe
-bool last_arm_state = false;
-float current_alt = 0.0, last_stable_alt = 0.0;
-float roll = 0.0, pitch = 0.0;
-uint16_t throttle = 0;
-float ground_speed = 0.0;
+bool is_armed = false;
 uint8_t system_status = 0;
-unsigned long stuck_timer = 0, roof_stuck_timer = 0, gyro_crash_timer = 0;
-bool emergency_triggered = false;
-bool wasFlying = false;
-bool failsafePending = false;
-uint8_t failsafeStep = 0;
-uint8_t failsafeRepeat = 0;
-unsigned long failsafeTime = 0;
-bool autoArmDone = false;
-unsigned long autoArmTime = 0;
-uint8_t autoArmRetries = 0;
 uint8_t gps_fix_type = 0;
 uint8_t gps_sats = 0;
-unsigned long gps_ok_since = 0;
+float   battery_voltage = 0.0f;
+int8_t  battery_remaining = -1;
+bool    sys_status_received = false;
+float roll_deg = 0.0f, pitch_deg = 0.0f;
+uint8_t fc_sys_id = 1; // system_id FC, дістаємо з хартбіту
 
-bool bootDone = false;
-uint8_t bootState = 0;
-unsigned long bootTimer = 0;
-uint8_t targetWiFi = 0;
-bool tiltInBoot = false;
+// --- EKF / Компас ---
+uint16_t ekf_flags = 0;
+float mag_test_ratio = 0.0f;
+bool ekf_report_received = false;
 
-#define MODE_STABILIZE  0
-#define MODE_AUTO       3
+// --- Детекція обертання >30° ---
+float rot_snap_roll = 0.0f, rot_snap_pitch = 0.0f;
+bool rot_detected = false;
 
-#define STATUS_QUEUE_SIZE 12
-char status_queue[STATUS_QUEUE_SIZE][64];
-uint8_t q_write = 0;
-uint8_t q_read = 0;
+// --- Прапорці одноразових дій ---
+bool mag_error_msg_sent = false;
+bool mag_ok_msg_sent   = false;
+bool cal_cmd_sent      = false;
+bool cal_success       = false;
+bool cal_finalized     = false;
+uint8_t cal_completion_pct = 0;
+bool no_arm_init       = false;
+bool arm_cmd_sent      = false;
+bool mode_cmd_sent     = false;
+bool mission_start_msg = false;
+bool was_in_auto = false;
 
+// --- Місія ---
+uint16_t mission_count = 0;
+bool mission_loaded = false;
+bool missionFirstParsed = false;
+unsigned long lastMissionReq = 0;
+
+// --- Таймери ---
+unsigned long start_time = 0;
+unsigned long last_wifi_hb = 0;
+unsigned long last_serial_log = 0;
+unsigned long last_sta_reconnect = 0;
+unsigned long recon_phase_start = 0;
+unsigned long state_entry_ms = 0;
+unsigned long last_arm_retry_ms   = 0;
+unsigned long last_mode_retry_ms  = 0;
+unsigned long last_reason_report_ms = 0;
+unsigned long last_server_pkt_ms  = 0;
+
+// --- Статусна черга ---
+#define STATUS_QUEUE_SIZE 16
+char status_queue[STATUS_QUEUE_SIZE][72];
+uint8_t q_write = 0, q_read = 0;
+
+// --- Черга STATUSTEXT від полетника ---
+#define REASON_QUEUE_SIZE 12
+char reason_queue[REASON_QUEUE_SIZE][72];
+uint8_t rq_write = 0, rq_read = 0;
+
+// --- Термінал ---
 String inputBuffer = "";
 
-void setLed(uint32_t c) { pixels.setPixelColor(0, c); pixels.show(); }
-
-void loadConfig() {
-  Preferences p;
-  p.begin("dbridge", true);
-  p.getString("sta_ssid", cfg.sta_ssid, sizeof(cfg.sta_ssid));
-  p.getString("sta_pass", cfg.sta_pass, sizeof(cfg.sta_pass));
-  cfg.baud     = p.getUInt("baud", 921600);
-  cfg.wifi_boot = p.getUInt("wifi_boot", 1);
-  cfg.sys_id    = p.getUInt("sys_id", 1);
-  p.end();
-
-  Serial.printf("NVS LOADED: sta_ssid=%s, baud=%u, wifi_boot=%u, sys_id=%u\n", cfg.sta_ssid, cfg.baud, cfg.wifi_boot, cfg.sys_id);
+// ============================================================
+//               ДОПОМІЖНІ ФУНКЦІЇ LED / КОЛЬОРИ
+// ============================================================
+void setLed(uint32_t c) {
+  pixels.setPixelColor(0, c);
+  pixels.show();
 }
 
-
-void saveConfig() {
-  Preferences p;
-  p.begin("dbridge", false);
-  p.putString("sta_ssid", cfg.sta_ssid);
-  p.putString("sta_pass", cfg.sta_pass);
-  p.putUInt("baud",      cfg.baud);
-  p.putUInt("wifi_boot", cfg.wifi_boot);
-  p.putUInt("sys_id",    cfg.sys_id);
-  p.end();
-  Serial.printf("NVS SAVED: sta_ssid=%s, baud=%u, wifi_boot=%u, sys_id=%u\n", cfg.sta_ssid, cfg.baud, cfg.wifi_boot, cfg.sys_id);
+uint32_t getWifiCoColor() {
+  if (!wifiOn) return LED_OFF;
+  if (!hasWifi) return LED_WHITE;
+  if (!hasServer) return LED_CYAN;
+  return LED_BLUE;
 }
 
+uint32_t getMavCoColor() {
+  switch (state) {
+    case STATE_INIT_MAVLINK:
+      if (!heartbeat_received) return getWifiCoColor();
+      return LED_LILAC;
+    case STATE_MAG_ERROR:       return LED_CHERRY_D;
+    case STATE_MAG_OK:          return LED_MAGENTA;
+    case STATE_CALIBRATION:     return LED_MAGENTA;
+    case STATE_CALIBRATION_END: return LED_OFF;
+    case STATE_NO_ARM:
+    case STATE_ARMING:          return LED_YELLOW;
+    case STATE_ARMED:
+    case STATE_START_MISSION:   return LED_GREEN;
+    case STATE_MISSION:         return LED_GREEN;
+    case STATE_RELAY_CONTROL:   return LED_RED;
+    default: return LED_OFF;
+  }
+}
 
-void send_statustext(const char* text);
+void updateLED() {
+  if (mdfly == 60) { setLed(LED_OFF); return; }
+
+  // Стан 11 (MISSION) — зелений постійно
+  if (state == STATE_MISSION) { setLed(LED_GREEN); return; }
+  // Стан 6 (CALIBRATION_END) — вимкнено
+  if (state == STATE_CALIBRATION_END) { setLed(LED_OFF); return; }
+
+  // Стани 3,4 (MAG_ERROR, MAG_OK) — 0.25 с ON / 1.00 с OFF
+  if (state == STATE_MAG_ERROR || state == STATE_MAG_OK) {
+    setLed((millis() % 1250) < 250 ? getMavCoColor() : LED_OFF);
+    return;
+  }
+
+  // Стан 5 (CALIBRATION) — 0.25 с ON / 0.25 с OFF
+  if (state == STATE_CALIBRATION) {
+    setLed((millis() % 500) < 250 ? LED_MAGENTA : LED_OFF);
+    return;
+  }
+
+  // Усі інші стани: 500 мс ON / 500 мс OFF
+  bool onPhase = (millis() % 1000) < 500;
+
+  if (state == STATE_INIT_WIFI) {
+    // Стан 1: ON-фаза показує колір wifi_co
+    setLed(onPhase ? getWifiCoColor() : LED_OFF);
+  } else {
+    // Стани 2-12: ON-фаза показує колір mav_co
+    setLed(onPhase ? getMavCoColor() : LED_OFF);
+  }
+}
+
+// ============================================================
+//                  WiFi  КЕРУВАННЯ
+// ============================================================
+void tryNextWifi();
 void queue_statustext(const char* text);
-void send_queued_statustext();
-
-void switchToSmartStaticIP() {
-  IPAddress ip = WiFi.localIP();
-  IPAddress gw = WiFi.gatewayIP();
-  IPAddress mask = WiFi.subnetMask();
-  if (gw == IPAddress(0,0,0,0) || ip == IPAddress(0,0,0,0)) return;
-  uint8_t mac[6];
-  WiFi.macAddress(mac);
-  uint8_t id = mac[5];
-  uint8_t ipTail = 201 + (id % 54);
-  IPAddress newIP(gw[0], gw[1], gw[2], ipTail);
-  WiFi.config(newIP, gw, mask);
-  WiFi.disconnect(false);
-  WiFi.reconnect();
-  Serial.printf("[IP] Set to %d.%d.%d.%d (MAC 0x%02X)\n", gw[0], gw[1], gw[2], ipTail, id);
-}
 
 void wifiActivate() {
   if (wifiOn) return;
   wifiOn = true;
-  setLed(LED_ORANGE);
+  hasWifi = false;
+  hasServer = false;
   WiFi.disconnect(false);
   delay(50);
   WiFi.mode(WIFI_STA);
   delay(50);
   WiFi.setTxPower(WIFI_POWER_8_5dBm);
   WiFi.setSleep(WIFI_PS_NONE);
-  
-  if (strlen(cfg.sta_ssid) > 0) {
-    WiFi.begin(cfg.sta_ssid, cfg.sta_pass);
-    wifiActivating = true;
-    wifiActivateTime = millis();
-    Serial.printf("Connecting to STA: %s\n", cfg.sta_ssid);
-    queue_statustext("WiFi STA Connecting");
-  } else {
-    Serial.println("STA SSID is empty. Use terminal to set it.");
-  }
-  
   udp.begin(UDP_PORT);
-
-  queue_statustext("WiFi ON");
+  wifiTryIdx = 0;
+  tryNextWifi();
 }
 
 void wifiDeactivate() {
   if (!wifiOn) return;
   wifiOn = false;
   wifiActivating = false;
-  staRetryCount = 0;
+  wifiTryIdx = 0;
   staWasConnected = false;
-  
+  hasWifi = false;
+  hasServer = false;
   udp.stop();
-
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
-  Serial.println("WiFi OFF (Radio Disabled)");
   queue_statustext("WiFi OFF");
 }
 
+void tryNextWifi() {
+  WiFi.begin(cfg.sta_ssid, cfg.sta_pass);
+  wifiActivating = true;
+  wifiTryStart = millis();
+}
+
+// ============================================================
+//                  UART / FC  ЗВ'ЯЗОК
+// ============================================================
 void fcBegin(int baud, int rx, int tx) {
   uart_config_t uart_config = {
-    .baud_rate = baud,
+    .baud_rate = (int)baud,
     .data_bits = UART_DATA_8_BITS,
-    .parity = UART_PARITY_DISABLE,
+    .parity    = UART_PARITY_DISABLE,
     .stop_bits = UART_STOP_BITS_1,
     .flow_ctrl = UART_HW_FLOWCTRL_DISABLE
   };
@@ -222,18 +305,15 @@ void fcBegin(int baud, int rx, int tx) {
 }
 
 size_t fcAvailable() {
-  size_t len; uart_get_buffered_data_len((uart_port_t)FC_UART_NUM, &len); return len;
+  size_t len;
+  uart_get_buffered_data_len((uart_port_t)FC_UART_NUM, &len);
+  return len;
 }
 
 void fcWrite(const uint8_t* d, size_t len) {
   uart_write_bytes((uart_port_t)FC_UART_NUM, d, len);
 }
 
-void sendToFC(const uint8_t* data, uint16_t len) { fcWrite(data, len); }
-
-// Otvechaem na IP otpravitelya (sohranyaetsya pri poluchenii paketa).
-// S relay — telefonniy NAT ne meshaet, potomu chto relay prorabotal
-// soedinenie v obe storony.
 void forwardToWiFi(const uint8_t* data, size_t len) {
   if (!wifiOn || WiFi.status() != WL_CONNECTED) return;
   if (!gcsIPSet) return;
@@ -242,14 +322,17 @@ void forwardToWiFi(const uint8_t* data, size_t len) {
   udp.endPacket();
 }
 
-
 void sendToBoth(const uint8_t* data, uint16_t len) {
   fcWrite(data, len);
   forwardToWiFi(data, len);
 }
 
+// ============================================================
+//               MAVLink  ВІДПРАВЛЕННЯ
+// ============================================================
 void send_statustext(const char* text) {
-  mavlink_msg_statustext_pack(cfg.sys_id, COMP_ID, &txMsg, MAV_SEVERITY_INFO, text, 0, 0);
+  mavlink_msg_statustext_pack(cfg.sys_id, COMP_ID, &txMsg,
+      MAV_SEVERITY_INFO, text, 0, 0);
   uint16_t len = mavlink_msg_to_send_buffer(txBuf, &txMsg);
   fcWrite(txBuf, len);
 }
@@ -257,15 +340,15 @@ void send_statustext(const char* text) {
 void queue_statustext(const char* text) {
   uint8_t next = (q_write + 1) % STATUS_QUEUE_SIZE;
   if (next == q_read) q_read = (q_read + 1) % STATUS_QUEUE_SIZE;
-  strncpy(status_queue[q_write], text, 63);
-  status_queue[q_write][63] = '\0';
+  strncpy(status_queue[q_write], text, 71);
+  status_queue[q_write][71] = '\0';
   q_write = next;
 }
 
 void send_queued_statustext() {
   for (int i = 0; i < 5 && q_read != q_write; i++) {
     mavlink_msg_statustext_pack(cfg.sys_id, COMP_ID, &txMsg,
-                                MAV_SEVERITY_INFO, status_queue[q_read], 0, 0);
+        MAV_SEVERITY_INFO, status_queue[q_read], 0, 0);
     uint16_t len = mavlink_msg_to_send_buffer(txBuf, &txMsg);
     sendToBoth(txBuf, len);
     q_read = (q_read + 1) % STATUS_QUEUE_SIZE;
@@ -273,186 +356,319 @@ void send_queued_statustext() {
 }
 
 void send_heartbeat() {
-  mavlink_msg_heartbeat_pack(cfg.sys_id, COMP_ID, &txMsg, MAV_TYPE_ONBOARD_CONTROLLER, MAV_AUTOPILOT_INVALID, 0, 0, 0);
+  mavlink_msg_heartbeat_pack(cfg.sys_id, COMP_ID, &txMsg,
+      MAV_TYPE_ONBOARD_CONTROLLER, MAV_AUTOPILOT_INVALID, 0, 0, 0);
   uint16_t len = mavlink_msg_to_send_buffer(txBuf, &txMsg);
-  fcWrite(txBuf, len);
+  sendToBoth(txBuf, len);
 }
 
 void send_mission_request_list() {
-  mavlink_msg_mission_request_list_pack(cfg.sys_id, COMP_ID, &txMsg, 1, MAV_COMP_ID_AUTOPILOT1, MAV_MISSION_TYPE_MISSION);
+  mavlink_msg_mission_request_list_pack(cfg.sys_id, COMP_ID, &txMsg,
+      fc_sys_id, MAV_COMP_ID_AUTOPILOT1, MAV_MISSION_TYPE_MISSION);
   uint16_t len = mavlink_msg_to_send_buffer(txBuf, &txMsg);
   fcWrite(txBuf, len);
 }
 
 void send_mission_request_int(uint16_t seq) {
-  mavlink_msg_mission_request_int_pack(cfg.sys_id, COMP_ID, &txMsg, 1, MAV_COMP_ID_AUTOPILOT1, seq, MAV_MISSION_TYPE_MISSION);
+  mavlink_msg_mission_request_int_pack(cfg.sys_id, COMP_ID, &txMsg,
+      fc_sys_id, MAV_COMP_ID_AUTOPILOT1, seq, MAV_MISSION_TYPE_MISSION);
   uint16_t len = mavlink_msg_to_send_buffer(txBuf, &txMsg);
   fcWrite(txBuf, len);
 }
 
-void sendMavlinkForceDisarm() {
-  mavlink_message_t msg; uint8_t buf[MAVLINK_MAX_PACKET_LEN];
-  mavlink_msg_command_long_pack(cfg.sys_id, COMP_ID, &msg, 1, MAV_COMP_ID_AUTOPILOT1,
-    MAV_CMD_COMPONENT_ARM_DISARM, 0, 0.0f, 21196.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
-  uint16_t len = mavlink_msg_to_send_buffer(buf, &msg); fcWrite(buf, len);
-  Serial.println("[FAILSAFE] DISARM");
-}
-
-void sendMavlinkSetRelay() {
-  mavlink_message_t msg; uint8_t buf[MAVLINK_MAX_PACKET_LEN];
-  mavlink_msg_command_long_pack(cfg.sys_id, COMP_ID, &msg, 1, MAV_COMP_ID_AUTOPILOT1,
-    MAV_CMD_DO_SET_RELAY, 0, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
-  uint16_t len = mavlink_msg_to_send_buffer(buf, &msg); fcWrite(buf, len);
-  Serial.println("[FAILSAFE] RELAY");
-  queue_statustext("Relay ON");
+void send_command_long(uint16_t cmd, float p1, float p2, float p3,
+                       float p4, float p5, float p6, float p7) {
+  mavlink_msg_command_long_pack(cfg.sys_id, COMP_ID, &txMsg,
+      fc_sys_id, MAV_COMP_ID_AUTOPILOT1, cmd, 0,
+      p1, p2, p3, p4, p5, p6, p7);
+  uint16_t len = mavlink_msg_to_send_buffer(txBuf, &txMsg);
+  fcWrite(txBuf, len);
 }
 
 void sendMavlinkArm() {
-  mavlink_message_t msg; uint8_t buf[MAVLINK_MAX_PACKET_LEN];
-  mavlink_msg_command_long_pack(cfg.sys_id, COMP_ID, &msg, 1, MAV_COMP_ID_AUTOPILOT1,
-    MAV_CMD_COMPONENT_ARM_DISARM, 0, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
-  uint16_t len = mavlink_msg_to_send_buffer(buf, &msg); fcWrite(buf, len);
-  Serial.println("[AUTO-ARM] Sent");
+  send_command_long(MAV_CMD_COMPONENT_ARM_DISARM, 1.0f, 0.0f,
+                    0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+}
+
+void sendMavlinkForceDisarm() {
+  send_command_long(MAV_CMD_COMPONENT_ARM_DISARM, 0.0f, 21196.0f,
+                    0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
 }
 
 void sendMavlinkSetMode(uint8_t mode) {
-  mavlink_message_t msg; uint8_t buf[MAVLINK_MAX_PACKET_LEN];
-  mavlink_msg_command_long_pack(cfg.sys_id, COMP_ID, &msg, 1, MAV_COMP_ID_AUTOPILOT1,
-    MAV_CMD_DO_SET_MODE, 0, MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, mode, 0, 0, 0, 0, 0);
-  uint16_t len = mavlink_msg_to_send_buffer(buf, &msg); fcWrite(buf, len);
-  Serial.printf("[AUTO-MODE] Set mode %d\n", mode);
+  send_command_long(MAV_CMD_DO_SET_MODE,
+                    MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, mode,
+                    0, 0, 0, 0, 0);
 }
 
-void executeFailsafeAsync() {
-  failsafePending = true; failsafeStep = 0; failsafeTime = millis();
-  Serial.println("[FAILSAFE] PENDING");
+void sendMavlinkSetRelay() {
+  send_command_long(MAV_CMD_DO_SET_RELAY, 0.0f, 1.0f,
+                    0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
 }
+
+void sendStartMagCal() {
+  send_command_long(MAV_CMD_DO_START_MAG_CAL, 0.0f, 0.0f,
+                    1.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+}
+
+void sendAcceptMagCal() {
+  send_command_long(MAV_CMD_DO_ACCEPT_MAG_CAL, 0.0f, 0.0f,
+                    0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+}
+
+void sendPreflightStorage() {
+  send_command_long(MAV_CMD_PREFLIGHT_STORAGE, 1.0f, 0.0f,
+                    0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+}
+
+// ============================================================
+//               MAVLink  ПРИЙОМ / ОБРОБКА
+// ============================================================
+static bool crash_triggered = false;
 
 void handle_mavlink_message(mavlink_message_t* msg) {
   switch (msg->msgid) {
+
     case MAVLINK_MSG_ID_HEARTBEAT: {
       mavlink_heartbeat_t hb;
       mavlink_msg_heartbeat_decode(msg, &hb);
+      fc_sys_id = msg->sysid;
       heartbeat_received = true;
-      static bool first_hb = false;
-      if (!first_hb) { first_hb = true; queue_statustext("Mavlink OK");
-        mavlink_msg_command_long_pack(cfg.sys_id, COMP_ID, &txMsg, 1, MAV_COMP_ID_AUTOPILOT1,
-          MAV_CMD_SET_MESSAGE_INTERVAL, 0, MAVLINK_MSG_ID_ATTITUDE, 100000, 0, 0, 0, 0, 0);
-        uint16_t l = mavlink_msg_to_send_buffer(txBuf, &txMsg); fcWrite(txBuf, l);
-        mavlink_msg_command_long_pack(cfg.sys_id, COMP_ID, &txMsg, 1, MAV_COMP_ID_AUTOPILOT1,
-          MAV_CMD_SET_MESSAGE_INTERVAL, 0, MAVLINK_MSG_ID_RAW_IMU, 100000, 0, 0, 0, 0, 0);
-        l = mavlink_msg_to_send_buffer(txBuf, &txMsg); fcWrite(txBuf, l); }
       current_custom_mode = hb.custom_mode;
       system_status = hb.system_status;
-      if (hb.custom_mode == TAKEOFF_MODE) takeoff_mode_detected = true;
       is_armed = (hb.base_mode & MAV_MODE_FLAG_SAFETY_ARMED) != 0;
-      if (last_arm_state && !is_armed && !emergency_triggered && wasFlying && autoArmDone) {
-        emergency_triggered = true;
-        sendMavlinkForceDisarm();
-        sendMavlinkSetRelay();
-        Serial.println("[LAND] Disarm + action");
+
+      static bool first_hb = true;
+      if (first_hb) {
+        first_hb = false;
+        queue_statustext("Mavlink OK");
+        send_command_long(MAV_CMD_SET_MESSAGE_INTERVAL,
+                          MAVLINK_MSG_ID_ATTITUDE, 100000, 0, 0, 0, 0, 0);
+        send_command_long(MAV_CMD_SET_MESSAGE_INTERVAL,
+                          MAVLINK_MSG_ID_RAW_IMU, 100000, 0, 0, 0, 0, 0);
+        send_command_long(MAV_CMD_SET_MESSAGE_INTERVAL,
+                          MAVLINK_MSG_ID_EKF_STATUS_REPORT, 200000, 0, 0, 0, 0, 0);
+        send_command_long(MAV_CMD_SET_MESSAGE_INTERVAL,
+                          MAVLINK_MSG_ID_VFR_HUD, 200000, 0, 0, 0, 0, 0);
+        send_command_long(MAV_CMD_SET_MESSAGE_INTERVAL,
+                          MAVLINK_MSG_ID_GPS_RAW_INT, 200000, 0, 0, 0, 0, 0);
+        send_command_long(MAV_CMD_SET_MESSAGE_INTERVAL,
+                          MAVLINK_MSG_ID_SYS_STATUS, 200000, 0, 0, 0, 0, 0);
       }
-      last_arm_state = is_armed;
       break;
     }
-    case MAVLINK_MSG_ID_MISSION_COUNT: {
-      mavlink_mission_count_t mc;
-      mavlink_msg_mission_count_decode(msg, &mc);
-      mission_count = mc.count; mission_loaded = false; pTg = Point();
-      Serial.printf("MISSCOUNT=%d\n", mission_count);
-      if (mission_count > 0) send_mission_request_int(0);
-      break;
-    }
-    case MAVLINK_MSG_ID_MISSION_ITEM_INT: {
-      mavlink_mission_item_int_t item;
-      mavlink_msg_mission_item_int_decode(msg, &item);
-      if (item.command == MAV_CMD_NAV_TAKEOFF) takeoff_detected = true;
-      if (item.command == MAV_CMD_NAV_LAND && !pTg.received)
-        { pTg.lat = item.x; pTg.lon = item.y; pTg.received = true; }
-      if (item.command == MAV_CMD_DO_SET_RELAY &&
-          item.param2 > 0.9f) pTg.relay = true;
-      Serial.printf("ITEM: s=%d c=%d p=%.2f\n", item.seq, item.command, item.param1);
-      if (item.seq + 1 < mission_count) send_mission_request_int(item.seq + 1);
-      else { mission_loaded = true; missionFirstParsed = true; lastMissionReq = 0; }
-      break;
-    }
-    case MAVLINK_MSG_ID_MISSION_CURRENT:
-      break;
+
     case MAVLINK_MSG_ID_ATTITUDE: {
       mavlink_attitude_t att;
       mavlink_msg_attitude_decode(msg, &att);
-      roll = att.roll * 57.2958f; pitch = att.pitch * 57.2958f;
-      break;
-    }
-    case MAVLINK_MSG_ID_VFR_HUD: {
-      mavlink_vfr_hud_t vfr;
-      mavlink_msg_vfr_hud_decode(msg, &vfr);
-      current_alt = vfr.alt; throttle = vfr.throttle; ground_speed = vfr.groundspeed;
-      if (is_armed && current_alt > 2.0f) wasFlying = true;
-      if (!emergency_triggered && wasFlying && is_armed) {
-        if (abs(current_alt - last_stable_alt) < 0.15f && ground_speed < 0.15f) {
-          if (stuck_timer == 0) stuck_timer = millis();
-          unsigned long dt = millis() - stuck_timer;
-          if (dt > 3000 && throttle > 45) { emergency_triggered = true; executeFailsafeAsync(); Serial.println("[CRASH] Net"); }
-          if (dt > 2500 && (abs(roll) > 0.18f || abs(pitch) > 0.18f) && throttle > 25) { emergency_triggered = true; executeFailsafeAsync(); Serial.println("[CRASH] Roof"); }
-        } else { stuck_timer = 0; last_stable_alt = current_alt; }
+      roll_deg  = att.roll  * 57.2958f;
+      pitch_deg = att.pitch * 57.2958f;
+      static uint32_t lastAttDbg = 0;
+      if (millis() - lastAttDbg > 5000) {
+        lastAttDbg = millis();
+        Serial.printf("[ATT] r=%.1f p=%.1f\n", roll_deg, pitch_deg);
       }
       break;
     }
+
     case MAVLINK_MSG_ID_RAW_IMU: {
       mavlink_raw_imu_t imu;
       mavlink_msg_raw_imu_decode(msg, &imu);
-      if (!emergency_triggered && wasFlying && is_armed && autoArmDone) {
-        if (abs(imu.xgyro) > 4500 || abs(imu.ygyro) > 4500) {
+      // Краш-детекція (перекидання)
+      static unsigned long gyro_crash_timer = 0;
+      if (!crash_triggered && is_armed) {
+        if (abs(imu.xgyro) > 4500 || abs(imu.ygyro) > 4500 || abs(imu.zgyro) > 4500) {
           if (gyro_crash_timer == 0) gyro_crash_timer = millis();
-          if (millis() - gyro_crash_timer > 150) { emergency_triggered = true; executeFailsafeAsync(); Serial.println("[CRASH] Tumble"); }
-        } else { gyro_crash_timer = 0; }
+          if (millis() - gyro_crash_timer > 150) {
+            crash_triggered = true;
+            sendMavlinkForceDisarm();
+            queue_statustext("Crash: tumble");
+          }
+        } else {
+          gyro_crash_timer = 0;
+        }
       }
       break;
     }
+
+    case MAVLINK_MSG_ID_VFR_HUD: {
+      mavlink_vfr_hud_t vfr;
+      mavlink_msg_vfr_hud_decode(msg, &vfr);
+      // Краш-детекція (застрягання)
+      static float last_alt = 0.0f;
+      static unsigned long stuck_timer = 0;
+      static bool wasFlying = false;
+      if (is_armed && vfr.alt > 2.0f) wasFlying = true;
+      if (!crash_triggered && wasFlying && is_armed) {
+        if (fabs(vfr.alt - last_alt) < 0.15f && vfr.groundspeed < 0.15f) {
+          if (stuck_timer == 0) stuck_timer = millis();
+          if (millis() - stuck_timer > 3000 && vfr.throttle > 45) {
+            crash_triggered = true;
+            sendMavlinkForceDisarm();
+            queue_statustext("Crash: stuck");
+          }
+        } else {
+          stuck_timer = 0;
+          last_alt = vfr.alt;
+        }
+      }
+      break;
+    }
+
+    case MAVLINK_MSG_ID_EKF_STATUS_REPORT: {
+      mavlink_ekf_status_report_t ekf;
+      mavlink_msg_ekf_status_report_decode(msg, &ekf);
+      ekf_flags = ekf.flags;
+      mag_test_ratio = ekf.compass_variance;
+      ekf_report_received = true;
+      break;
+    }
+
+    case MAVLINK_MSG_ID_MISSION_COUNT: {
+      mavlink_mission_count_t mc;
+      mavlink_msg_mission_count_decode(msg, &mc);
+      mission_count = mc.count;
+      mission_loaded = false;
+      if (mission_count > 0) {
+        send_mission_request_int(0);
+      } else {
+        missionFirstParsed = true;
+        lastMissionReq = 0;
+      }
+      break;
+    }
+
+    case MAVLINK_MSG_ID_MISSION_ITEM_INT: {
+      mavlink_mission_item_int_t item;
+      mavlink_msg_mission_item_int_decode(msg, &item);
+      if (item.seq + 1 < mission_count) {
+        send_mission_request_int(item.seq + 1);
+      } else {
+        mission_loaded = true;
+        missionFirstParsed = true;
+        lastMissionReq = 0;
+      }
+      break;
+    }
+
+    case MAVLINK_MSG_ID_SYS_STATUS: {
+      mavlink_sys_status_t st;
+      mavlink_msg_sys_status_decode(msg, &st);
+      battery_voltage = st.voltage_battery * 0.001f;
+      battery_remaining = st.battery_remaining;
+      sys_status_received = true;
+      break;
+    }
+
     case MAVLINK_MSG_ID_GPS_RAW_INT: {
       mavlink_gps_raw_int_t gps;
       mavlink_msg_gps_raw_int_decode(msg, &gps);
       gps_fix_type = gps.fix_type;
       gps_sats = gps.satellites_visible;
-      if (gps_fix_type >= 3 && gps_sats >= 6 && gps_ok_since == 0) gps_ok_since = millis();
-      if (gps_fix_type < 3 || gps_sats < 6) gps_ok_since = 0;
       break;
     }
+
+    case MAVLINK_MSG_ID_MAG_CAL_PROGRESS: {
+      mavlink_mag_cal_progress_t c;
+      mavlink_msg_mag_cal_progress_decode(msg, &c);
+      cal_completion_pct = c.completion_pct;
+      // MAG_CAL_STATUS з common.xml: 0=NOT_STARTED,1=WAITING,2=STEP1,3=STEP2,
+      //   4=SUCCESS,5=FAILED,6=BAD_ORIENT,7=BAD_RADIUS
+      // SUCCESS, BAD_ORIENT, BAD_RADIUS — усі фінальні (autosave зберігає дані)
+      cal_success = (c.cal_status == 4 || c.cal_status == 6 || c.cal_status == 7);
+      static uint8_t last_status = 255;
+      if (c.cal_status != last_status) {
+        last_status = c.cal_status;
+        Serial.printf("[CAL] pct=%u status=%d succ=%d\n", c.completion_pct, c.cal_status, cal_success);
+      }
+      break;
+    }
+
+    case MAVLINK_MSG_ID_STATUSTEXT: {
+      mavlink_statustext_t stxt;
+      mavlink_msg_statustext_decode(msg, &stxt);
+      // Збираємо повідомлення з важливістю <= WARNING
+      if (stxt.severity <= MAV_SEVERITY_WARNING) {
+        uint8_t next = (rq_write + 1) % REASON_QUEUE_SIZE;
+        if (next == rq_read) rq_read = (rq_read + 1) % REASON_QUEUE_SIZE;
+        strncpy(reason_queue[rq_write], stxt.text, 71);
+        reason_queue[rq_write][71] = '\0';
+        rq_write = next;
+      }
+      break;
+    }
+
+    default:
+      break;
   }
 }
 
-
+// ============================================================
+//                  МІСТ FC ↔ WiFi
+// ============================================================
+uint32_t fc_bytes = 0, fc_msgs = 0;
 
 void bridgeFCtoWiFi() {
-  size_t avail = fcAvailable();
-  if (avail == 0) return;
-  size_t n = min(avail, (size_t)BRIDGE_BUF_SIZE);
-  n = uart_read_bytes((uart_port_t)FC_UART_NUM, bridgeBuf, n, 1);
-  if (n == 0) return;
-  fc_bytes += n;
-  forwardToWiFi(bridgeBuf, n);
-  for (size_t i = 0; i < n; i++)
-    if (mavlink_parse_char(MAVLINK_COMM_0, bridgeBuf[i], &mavMsg, &mavStatus)) {
-      fc_msgs++;
-      handle_mavlink_message(&mavMsg);
+  for (int pass = 0; pass < 4; pass++) {
+    size_t avail = fcAvailable();
+    if (avail == 0) break;
+    size_t n = min(avail, (size_t)BRIDGE_BUF_SIZE);
+    n = uart_read_bytes((uart_port_t)FC_UART_NUM, bridgeBuf, n, 0);
+    if (n == 0) break;
+    fc_bytes += n;
+    forwardToWiFi(bridgeBuf, n);
+    for (size_t i = 0; i < n; i++) {
+      if (mavlink_parse_char(MAVLINK_COMM_0, bridgeBuf[i], &mavMsg, &mavStatus)) {
+        fc_msgs++;
+        handle_mavlink_message(&mavMsg);
+      }
     }
+  }
 }
 
 void bridgeWiFiToFC() {
   if (!wifiOn || WiFi.status() != WL_CONNECTED) return;
   int sz = udp.parsePacket();
   if (sz > 0) {
-    IPAddress rip = udp.remoteIP();
-    uint16_t rport = udp.remotePort();
-    int n = udp.read(bridgeBuf, sizeof(bridgeBuf));
-    if (n > 0) {
-      fcWrite(bridgeBuf, n);
-      Serial.printf("[GCS CMD] %d bytes from %s:%u forwarded to FC\n", n, rip.toString().c_str(), rport);
+    last_server_pkt_ms = millis();
+    if (!hasServer) {
+      hasServer = true;
+      static unsigned long last_do_connect_msg = 0;
+      if (millis() - last_do_connect_msg > 60000) {
+        queue_statustext("DO connected");
+        last_do_connect_msg = millis();
+      }
     }
+    int n = udp.read(bridgeBuf, sizeof(bridgeBuf));
+    if (n <= 0) return;
+    fcWrite(bridgeBuf, n);
   }
 }
 
+// ============================================================
+//                    ТЕРМІНАЛ (UART0)
+// ============================================================
+void loadConfig() {
+  Preferences p;
+  p.begin("dbridge", true);
+  p.getString("ssid", cfg.sta_ssid, sizeof(cfg.sta_ssid));
+  p.getString("pass", cfg.sta_pass, sizeof(cfg.sta_pass));
+  cfg.baud      = p.getUInt("baud", 921600);
+  cfg.wifi_boot = p.getUInt("wifi_boot", 1);
+  cfg.sys_id    = p.getUInt("sys_id", 1);
+  p.end();
+}
+
+void saveConfig() {
+  Preferences p;
+  p.begin("dbridge", false);
+  p.putString("ssid", cfg.sta_ssid);
+  p.putString("pass", cfg.sta_pass);
+  p.putUInt("baud", cfg.baud);
+  p.putUInt("wifi_boot", cfg.wifi_boot);
+  p.putUInt("sys_id", cfg.sys_id);
+  p.end();
+}
 
 void handleTerminalConfig() {
   while (Serial.available() > 0) {
@@ -460,72 +676,67 @@ void handleTerminalConfig() {
     if (c == '\n' || c == '\r') {
       if (inputBuffer.length() > 0) {
         inputBuffer.trim();
-        
+
         if (inputBuffer.equalsIgnoreCase("STATUS")) {
-          Serial.println("\n--- CURRENT STATUS ---");
-          Serial.printf("WiFi Power: %s\n", wifiOn ? "ON (STA Mode)" : "OFF (Sleep)");
-          Serial.printf("WiFi Status: %s\n", (WiFi.status() == WL_CONNECTED) ? "CONNECTED" : "DISCONNECTED");
-          Serial.printf("IP Address: %s\n", WiFi.localIP().toString().c_str());
-          Serial.printf("Config SSID: %s\n", cfg.sta_ssid);
-          Serial.printf("Config UART Baud: %u\n", cfg.baud);
-          Serial.printf("Auto WiFi at boot: %s\n", cfg.wifi_boot ? "ON" : "OFF");
-          Serial.printf("SYS_ID: %u\n", cfg.sys_id);
-          Serial.println("----------------------");
-        } 
+          Serial.println("\n--- STATUS ---");
+          Serial.printf("State: %d  mdfly: %d\n", state, mdfly);
+          Serial.printf("WiFi: %s  IP: %s\n",
+              (WiFi.status() == WL_CONNECTED) ? "OK" : "NO",
+              WiFi.localIP().toString().c_str());
+          Serial.printf("hasServer: %d  hb: %d  armed: %d  mode: %u\n",
+              hasServer, heartbeat_received, is_armed, current_custom_mode);
+          Serial.printf("EKF: 0x%04X  mag: %.3f  mission: %d/%d\n",
+              ekf_flags, mag_test_ratio, mission_loaded, mission_count);
+          Serial.printf("FC: %u bytes  %u msgs\n", fc_bytes, fc_msgs);
+        }
         else if (inputBuffer.startsWith("SSID=")) {
-          String val = inputBuffer.substring(5);
-          strncpy(cfg.sta_ssid, val.c_str(), sizeof(cfg.sta_ssid) - 1);
-          Serial.printf("Set SSID to: %s (Type 'SAVE' to store)\n", cfg.sta_ssid);
-        } 
+          strncpy(cfg.sta_ssid, inputBuffer.substring(5).c_str(), sizeof(cfg.sta_ssid) - 1);
+          Serial.printf("SSID=%s (SAVE to store)\n", cfg.sta_ssid);
+        }
         else if (inputBuffer.startsWith("PASS=")) {
-          String val = inputBuffer.substring(5);
-          strncpy(cfg.sta_pass, val.c_str(), sizeof(cfg.sta_pass) - 1);
-          Serial.println("Set Password successfully (Type 'SAVE' to store)");
-        } 
+          strncpy(cfg.sta_pass, inputBuffer.substring(5).c_str(), sizeof(cfg.sta_pass) - 1);
+          Serial.println("PASS set (SAVE to store)");
+        }
         else if (inputBuffer.startsWith("BAUD=")) {
           uint32_t b = inputBuffer.substring(5).toInt();
-          if (b == 9600 || b == 19200 || b == 38400 || b == 57600 || b == 115200 || b == 230400 || b == 460800 || b == 921600) {
+          if (b >= 9600 && b <= 921600) {
             cfg.baud = b;
-            Serial.printf("Set UART Baud to: %u (Type 'SAVE' to store)\n", cfg.baud);
-          } else {
-            Serial.println("Invalid Baudrate!");
-          }
+            Serial.printf("BAUD=%u (SAVE to store)\n", cfg.baud);
+          } else Serial.println("Invalid baud");
         }
         else if (inputBuffer.equalsIgnoreCase("WIFI=1")) {
           if (!wifiOn) wifiActivate();
           cfg.wifi_boot = 1;
-          Serial.println("WiFi ON (auto at boot)");
+          Serial.println("WiFi ON");
         }
         else if (inputBuffer.equalsIgnoreCase("WIFI=0")) {
           if (wifiOn) wifiDeactivate();
           cfg.wifi_boot = 0;
-          Serial.println("WiFi OFF (off at boot)");
+          Serial.println("WiFi OFF");
         }
         else if (inputBuffer.equalsIgnoreCase("RELAY")) {
           sendMavlinkSetRelay();
-          Serial.println("RELAY 0 1 sent to FC");
+          Serial.println("RELAY sent");
         }
         else if (inputBuffer.equalsIgnoreCase("DISARM")) {
           sendMavlinkForceDisarm();
-          Serial.println("DISARM sent to FC");
+          Serial.println("DISARM sent");
         }
         else if (inputBuffer.startsWith("SYSID=")) {
           uint8_t sid = inputBuffer.substring(6).toInt();
           if (sid >= 1 && sid <= 255) {
             cfg.sys_id = sid;
-            Serial.printf("Set SYS_ID to: %u (Type 'SAVE' to store)\n", cfg.sys_id);
-          } else {
-            Serial.println("Invalid SYS_ID (1-255)");
+            Serial.printf("SYSID=%u (SAVE to store)\n", cfg.sys_id);
           }
         }
         else if (inputBuffer.equalsIgnoreCase("SAVE")) {
           saveConfig();
-          Serial.println("Configuration Saved! Rebooting...");
+          Serial.println("Saved. Rebooting...");
           delay(500);
           ESP.restart();
-        } 
+        }
         else {
-          Serial.printf("Unknown command: %s. Available: STATUS, SSID=xxx, PASS=xxx, BAUD=xxx, SYSID=N, WIFI=1, WIFI=0, RELAY, DISARM, SAVE\n", inputBuffer.c_str());
+          Serial.println("CMD: STATUS SSID= PASS= BAUD= SYSID= WIFI=0/1 RELAY DISARM SAVE");
         }
         inputBuffer = "";
       }
@@ -535,277 +746,520 @@ void handleTerminalConfig() {
   }
 }
 
-void handleTiltDetect() {
-  if (roll >= 30.0f && roll <= 120.0f)        { targetWiFi = 1; tiltInBoot = true; }
-  else if (roll >= -120.0f && roll <= -30.0f)  { targetWiFi = 0; tiltInBoot = true; }
-}
-
-void bootSequence() {
-  if (bootDone) return;
+// ============================================================
+//            ГОЛОВНА ФУНКЦІЯ МАШИНИ СТАНІВ (FSM)
+// ============================================================
+void updateSystemState() {
   unsigned long now = millis();
 
-  switch (bootState) {
-    case 0: {
-      if (heartbeat_received && (roll != 0.0f || pitch != 0.0f)) {
-        if (!bootTimer) bootTimer = now;
-        if (now - bootTimer >= 3000) {
-          targetWiFi = cfg.wifi_boot;
-          tiltInBoot = false;
-          bootTimer = now; bootState = 1;
-        }
-      } else {
-        bootTimer = 0;
-      }
-      break;
-    }
+  // ====== ОНОВЛЕННЯ hasWifi ======
+  hasWifi = wifiOn && (WiFi.status() == WL_CONNECTED);
 
-    case 1: {
-      if (now - bootTimer >= 3000) bootState = 2;
-      break;
-    }
-
-    case 2: {
-      handleTiltDetect();
-      if (now - bootTimer > 10000) {
-        if (targetWiFi != cfg.wifi_boot) {
-          bootTimer = now; bootState = 3;
-        } else {
-          bootState = 4;
-        }
-      }
-      break;
-    }
-
-    case 3: {
-      if (roll >= -20.0f && roll <= 20.0f) {
-        if (now - bootTimer > 5000) bootState = 4;
-      } else {
-        bootTimer = now;
-      }
-      break;
-    }
-
-    case 4:
-      // Tilt-override temparary — ne sohranyaem v NVS
-      if (targetWiFi && !wifiOn) wifiActivate();
-      if (!targetWiFi && wifiOn) wifiDeactivate();
-      bootDone = true;
-      break;
-  }
-}
-
-void mdFly() {
-  if (!bootDone || autoArmDone) return;
-  unsigned long now = millis();
-  static uint8_t mdState = 0;
-
-  switch (mdState) {
-    case 0:
-      if (!missionFirstParsed) return;
-      if (gps_fix_type >= 3 && gps_sats >= 6 && gps_ok_since > 0 && millis() - gps_ok_since >= 3000) {
-        if (current_custom_mode == MODE_STABILIZE && system_status == MAV_STATE_STANDBY && !is_armed && now - autoArmTime > 10000) {
-          queue_statustext("Rdy to ARM");
-          sendMavlinkArm();
-          queue_statustext("ARM");
-          autoArmTime = now;
-          autoArmRetries++;
-          mdState = 1;
-        }
-      }
-      break;
-
-    case 1:
-      if (is_armed) {
-        queue_statustext("Rdy to AUTO");
-        sendMavlinkSetMode(MODE_AUTO);
-        autoArmTime = now;
-        mdState = 2;
-      } else if (now - autoArmTime > 10000) {
-        queue_statustext(">ARM");
-        sendMavlinkArm();
-        autoArmTime = now;
-        autoArmRetries++;
-      }
-      break;
-
-    case 2:
-      if (current_custom_mode == MODE_AUTO) {
-        autoArmDone = true;
-        mdState = 0;
-        queue_statustext("AUTO");
-      } else if (now - autoArmTime > 10000) {
-        queue_statustext(">AUTO");
-        sendMavlinkSetMode(MODE_AUTO);
-        autoArmTime = now;
-      }
-      break;
-  }
-}
-
-void updateLED() {
-  unsigned long now = millis();
-
-  if (!bootDone) {
-    if (bootState == 0) {
-      setLed((now % 1000 < 500) ? (cfg.wifi_boot ? LED_BLUE : LED_WHITE) : LED_OFF);
-      return;
-    }
-    if (bootState == 1) {
-      setLed(cfg.wifi_boot ? LED_BLUE : LED_WHITE);
-      return;
-    }
-    if (bootState == 2) {
-      if (tiltInBoot) setLed(targetWiFi ? LED_PURPLE : LED_OFF);
-      else setLed((now % 500 < 250) ? LED_PURPLE : LED_OFF);
-      return;
-    }
-    if (bootState == 3) {
-      setLed(targetWiFi ? LED_PURPLE : LED_OFF);
-      return;
-    }
-    return;
+  // ====== ТАЙМАУТ WiFi: 1 хвилина без STA — вимкнути ======
+  if (!staWasConnected && wifiOn && (now - start_time > WIFI_TIMEOUT_MS)) {
+    wifiDeactivate();
   }
 
-  if (emergency_triggered || failsafePending) { setLed(LED_RED); return; }
+  // ====== БЛОКУВАННЯ mdfly: заморожує переходи, міст/LED працюють ======
+  if (mdfly == 60) return;
 
-  if (!heartbeat_received) { setLed((now % 1000 < 200) ? LED_WHITE : LED_OFF); return; }
-
-  uint32_t c = (current_custom_mode == 3) ? (is_armed ? LED_GREEN : LED_ORANGE) : LED_ORANGE;
-
-  if (!wifiOn) { setLed(c); return; }
-
-  if (WiFi.status() != WL_CONNECTED) {
-    setLed((now % 1000 < 500) ? c : LED_OFF);
-  } else {
-    setLed((now % 800 < 500) ? c : LED_OFF);
-  }
-}
-
-void setup() {
-  Serial.begin(115200);
-  delay(100);
-  loadConfig();
-  fcBegin(cfg.baud, 44, 43);
-  delay(50);
-  
-  pixels.begin(); pixels.setBrightness(10); pixels.clear(); setLed(LED_BLUE);
-  
-  WiFi.persistent(false);
-  pinMode(BOOT_BTN, INPUT_PULLUP);
-  
-  if (cfg.wifi_boot) wifiActivate();
-  
-  start_time = millis();
-   Serial.println("\n=== ESP32-S3 DropCtrlV3 VPS Relay Ready ===");
-  Serial.println("Terminal configuration active. Type 'STATUS' for info.");
-  queue_statustext("ESP32-S3 WiFi Bridge Ready");
-}
-
-void loop() {
-  static unsigned long apAutoStart = 0;
-  if (heartbeat_received) { apAutoStart = millis(); }
-  else if (!wifiOn && apAutoStart == 0) { apAutoStart = millis(); }
-  else if (!heartbeat_received && !wifiOn && millis() - apAutoStart > 10000) {
-    Serial.println("No FC heartbeat - starting AP for config");
-    wifiActivate();
-    apAutoStart = millis();
-  }
-  handleTerminalConfig();
-
-  if (wifiOn) {
-    bridgeWiFiToFC();
-  }
-  bridgeFCtoWiFi();
-
-  unsigned long now = millis();
-  if (now - last_wifi_hb >= 1000)       { send_heartbeat(); send_queued_statustext(); last_wifi_hb = now; }
-
-  static unsigned long lastBootPress = 0;
-  if (!digitalRead(BOOT_BTN) && now - lastBootPress > 500) {
-    delay(50);
-    if (!digitalRead(BOOT_BTN)) {
-      if (wifiOn) wifiDeactivate(); else wifiActivate();
-      lastBootPress = now;
-      Serial.printf("WiFi MANUAL %s\n", wifiOn ? "ON" : "OFF");
-    }
-  }
-
+  // ====== ЗАПИТ МІСІЇ (фоновий) ======
   if (heartbeat_received && !missionFirstParsed) {
     if (lastMissionReq == 0 && now - start_time > 2000) {
       mission_count = 0;
       mission_loaded = false;
       send_mission_request_list();
       lastMissionReq = now;
-      Serial.println("Mission scan started");
     } else if (lastMissionReq && now - lastMissionReq > 5000) {
       missionFirstParsed = true;
       lastMissionReq = 0;
-      Serial.println("Mission scan done");
     }
   }
 
-  if (failsafePending) {
-    unsigned long fn = millis();
-    if (failsafeStep == 0) {
-      sendMavlinkForceDisarm(); failsafeStep = 1; failsafeTime = fn;
-    } else if (failsafeStep == 1 && fn - failsafeTime >= 25) {
-      sendMavlinkSetRelay(); failsafeStep = 2; failsafeTime = fn;
-    } else if (failsafeStep == 2 && fn - failsafeTime >= 50) {
-      failsafePending = false;
-      Serial.println("[FAILSAFE] Complete");
+  // ====== СКИДАННЯ ПРАПОРЦІВ ПРИ ЗМІНІ СТАНУ ======
+  static SystemState lastState = STATE_INIT_WIFI;
+  if (state != lastState) {
+    state_entry_ms = now;
+    crash_triggered = false;
+    Serial.printf("[S] %d->%d\n", lastState, state);
+
+    switch (state) {
+      case STATE_MAG_ERROR:
+        mag_error_msg_sent = false;
+        rot_snap_roll  = roll_deg;
+        rot_snap_pitch = pitch_deg;
+        rot_detected = false;
+        Serial.printf("--> MAG_ERROR snap R=%.1f P=%.1f, mag=%.3f\n", roll_deg, pitch_deg, mag_test_ratio);
+        break;
+      case STATE_MAG_OK:
+        mag_ok_msg_sent = false;
+        rot_snap_roll  = roll_deg;
+        rot_snap_pitch = pitch_deg;
+        rot_detected = false;
+        Serial.printf("--> MAG_OK snap R=%.1f P=%.1f, mag=%.3f\n", roll_deg, pitch_deg, mag_test_ratio);
+        break;
+      case STATE_CALIBRATION:
+        cal_cmd_sent = false;
+        cal_success = false;
+        cal_completion_pct = 0;
+        break;
+      case STATE_CALIBRATION_END:
+        cal_finalized = false;
+        break;
+      case STATE_NO_ARM:
+        no_arm_init = false;
+        break;
+      case STATE_ARMING:
+        arm_cmd_sent = false;
+        last_arm_retry_ms = 0;
+        break;
+      case STATE_START_MISSION:
+        mode_cmd_sent = false;
+        last_mode_retry_ms = 0;
+        break;
+      case STATE_MISSION:
+        mission_start_msg = false;
+        was_in_auto = false;
+        break;
+      default:
+        break;
+    }
+    lastState = state;
+  }
+
+  // ====== МАШИНА СТАНІВ ======
+  switch (state) {
+
+    // --------------------------------------------------
+    //  STATE 1: INIT_WIFI — Старт (2с показує статус WiFi, потім іде далі)
+    // --------------------------------------------------
+    case STATE_INIT_WIFI: {
+      if (state_entry_ms == 0) state_entry_ms = now;
+      if (now - state_entry_ms > 2000) {
+        state = STATE_INIT_MAVLINK;
+      }
+      break;
+    }
+
+    // --------------------------------------------------
+    //  STATE 2: INIT_MAVLINK — Очікування MAVLink та EKF
+    // --------------------------------------------------
+    case STATE_INIT_MAVLINK: {
+      if (!heartbeat_received) break;
+      if (!ekf_report_received) break;
+
+      bool ekf_ok = ((ekf_flags & EKF_ATTITUDE) != 0);
+
+      static bool ekf_ok_prev = false;
+      static unsigned long ekf_att_stable_ms = 0;
+      static bool mag_nonzero_ms = false;
+      static unsigned long mag_nonzero_at = 0;
+      if (ekf_ok != ekf_ok_prev) {
+        ekf_ok_prev = ekf_ok;
+        if (ekf_ok) {
+          ekf_att_stable_ms = now;
+          mag_nonzero_ms = false;
+          mag_nonzero_at = 0;
+        }
+        Serial.printf("[EKF] flags=0x%04X att=%d mag=%.3f\n",
+                       ekf_flags, ekf_ok, mag_test_ratio);
+      }
+
+      if (!ekf_ok) break;
+
+      // Чекаємо 5с після EKF_ATTITUDE
+      if (now - ekf_att_stable_ms < 5000) break;
+
+      // Ловимо момент першого ненульового mag_test_ratio
+      if (!mag_nonzero_ms && mag_test_ratio > 0.001f) {
+        mag_nonzero_ms = true;
+        mag_nonzero_at = now;
+        Serial.printf("[MAG] non-zero at %.3f\n", mag_test_ratio);
+      }
+
+      if (mag_nonzero_ms && now - mag_nonzero_at >= 20000) {
+        if (mag_test_ratio > 0.5f) {
+          state = STATE_MAG_ERROR;
+        } else {
+          state = STATE_MAG_OK;
+        }
+        break;
+      }
+
+      // Таймаут 60с — mag так і не став ненульовим, вважаємо OK
+      if (!mag_nonzero_ms && now - ekf_att_stable_ms > 60000) {
+        state = STATE_MAG_OK;
+      }
+      break;
+    }
+
+    // --------------------------------------------------
+    //  STATE 3: MAG_ERROR — Компас поганий
+    // --------------------------------------------------
+    case STATE_MAG_ERROR: {
+      if (!mag_error_msg_sent) {
+        char buf[72];
+        snprintf(buf, sizeof(buf), "mag_test_ratio = %.3f — калібровка", mag_test_ratio);
+        queue_statustext(buf);
+        send_statustext(buf);
+        mag_error_msg_sent = true;
+      }
+
+      state = STATE_CALIBRATION;
+      break;
+    }
+
+    // --------------------------------------------------
+    //  STATE 4: MAG_OK — Компас у нормі
+    // --------------------------------------------------
+    case STATE_MAG_OK: {
+      if (!mag_ok_msg_sent) {
+        char buf[72];
+        snprintf(buf, sizeof(buf), "mag_test_ratio = %.3f — чекаю обертання", mag_test_ratio);
+        queue_statustext(buf);
+        send_statustext(buf);
+        mag_ok_msg_sent = true;
+      }
+
+      if (fabs(roll_deg - rot_snap_roll) > 30.0f ||
+          fabs(pitch_deg - rot_snap_pitch) > 30.0f) {
+        rot_detected = true;
+        Serial.printf("[ROT] MAG_OK dR=%.1f dP=%.1f!\n",
+                      roll_deg - rot_snap_roll, pitch_deg - rot_snap_pitch);
+      }
+
+      if (rot_detected) {
+        state = STATE_CALIBRATION;
+        break;
+      }
+
+      // Якщо 10 секунд немає обертання — переходимо до NO_ARM
+      if (now - state_entry_ms > 10000) {
+        queue_statustext("Компас ок, обертання нема -> NO_ARM");
+        state = STATE_NO_ARM;
+      }
+      break;
+    }
+
+    // --------------------------------------------------
+    //  STATE 5: CALIBRATION — Режим калібровки
+    // --------------------------------------------------
+    case STATE_CALIBRATION: {
+      if (!cal_cmd_sent) {
+        sendStartMagCal();
+        queue_statustext("Калібровка компаса запущена");
+        cal_cmd_sent = true;
+      }
+
+      if (cal_success) {
+        state = STATE_CALIBRATION_END;
+      }
+      break;
+    }
+
+    // --------------------------------------------------
+    //  STATE 6: CALIBRATION_END — Фінал калібровки
+    // --------------------------------------------------
+    case STATE_CALIBRATION_END: {
+      if (!cal_finalized) {
+        sendAcceptMagCal();
+        sendPreflightStorage();
+        queue_statustext("Калібровка завершена");
+        mdfly = 60;
+        cal_finalized = true;
+      }
+      break;
+    }
+
+    // --------------------------------------------------
+    //  STATE 7: NO_ARM — Очікування готовності до ARM
+    // --------------------------------------------------
+    case STATE_NO_ARM: {
+      // Якщо магнітометр погіршився — назад у MAG_ERROR (чекає обертання вічно)
+      if (mag_test_ratio > 0.5f) {
+        state = STATE_MAG_ERROR;
+        break;
+      }
+
+      if (!no_arm_init) {
+        send_mission_request_list();
+        queue_statustext("Перевірка готовності до ARM");
+        no_arm_init = true;
+      }
+
+      // Звіт про статус — тільки при зміні
+      static uint8_t  last_gps_fix = 255;
+      static uint8_t  last_sats   = 255;
+      static int8_t   last_bat_pct = -2;
+      static bool     last_mis_loaded = false;
+      if (now - last_reason_report_ms >= REASON_REPORT_MS) {
+        last_reason_report_ms = now;
+        while (rq_read != rq_write) {
+          queue_statustext(reason_queue[rq_read]);
+          rq_read = (rq_read + 1) % REASON_QUEUE_SIZE;
+        }
+        if (mission_loaded != last_mis_loaded) {
+          last_mis_loaded = mission_loaded;
+          queue_statustext(mission_loaded ? "Місію завантажено" : "Місію НЕ завантажено");
+        }
+        if (gps_fix_type != last_gps_fix || gps_sats != last_sats || battery_remaining != last_bat_pct) {
+          last_gps_fix = gps_fix_type;
+          last_sats = gps_sats;
+          last_bat_pct = battery_remaining;
+          char buf[48];
+          snprintf(buf, sizeof(buf), "GPS:%d/%d", gps_fix_type, gps_sats);
+          queue_statustext(buf);
+          snprintf(buf, sizeof(buf), "Bat:%.1fV %d%%", battery_voltage, battery_remaining);
+          queue_statustext(buf);
+        }
+      }
+
+      bool gps_ok = (gps_fix_type >= 3);
+      bool bat_ok = sys_status_received &&
+                    (battery_voltage > 10.5f || battery_voltage < 0.01f);
+      if (system_status == MAV_STATE_STANDBY && mission_loaded && gps_ok && bat_ok) {
+        state = STATE_ARMING;
+      }
+      break;
+    }
+
+    // --------------------------------------------------
+    //  STATE 8: ARMING — Авто-Армінг
+    // --------------------------------------------------
+    case STATE_ARMING: {
+      // Якщо дрон роззброївся — повертаємось у NO_ARM
+      if (!is_armed && now - state_entry_ms > 3000) {
+        queue_statustext("Роззброєння — повернення в NO_ARM");
+        state = STATE_NO_ARM;
+        break;
+      }
+      if (!arm_cmd_sent || (now - last_arm_retry_ms >= ARM_RETRY_INTERVAL_MS)) {
+        sendMavlinkArm();
+        queue_statustext("Надсилаю команду ARM");
+        arm_cmd_sent = true;
+        last_arm_retry_ms = now;
+      }
+
+      if (is_armed) {
+        state = STATE_ARMED;
+      }
+      break;
+    }
+
+    // --------------------------------------------------
+    //  STATE 9: ARMED — Дрон заармлено
+    // --------------------------------------------------
+    case STATE_ARMED: {
+      // Якщо дрон роззброївся — повертаємось у NO_ARM
+      if (!is_armed) {
+        queue_statustext("Роззброєння — повернення в NO_ARM");
+        state = STATE_NO_ARM;
+        break;
+      }
+      bool mission_ready = mission_loaded && missionFirstParsed;
+
+      if (mission_ready) {
+        state = STATE_START_MISSION;
+      } else {
+        if (now - last_reason_report_ms >= REASON_REPORT_MS) {
+          last_reason_report_ms = now;
+          while (rq_read != rq_write) {
+            queue_statustext(reason_queue[rq_read]);
+            rq_read = (rq_read + 1) % REASON_QUEUE_SIZE;
+          }
+          if (!mission_loaded) queue_statustext("Місія не завантажена");
+        }
+      }
+      break;
+    }
+
+    // --------------------------------------------------
+    //  STATE 10: START_MISSION — Запуск місії
+    // --------------------------------------------------
+    case STATE_START_MISSION: {
+      // Якщо дрон роззброївся — повертаємось у NO_ARM
+      if (!is_armed) {
+        queue_statustext("Роззброєння — повернення в NO_ARM");
+        state = STATE_NO_ARM;
+        break;
+      }
+      if (!mode_cmd_sent || (now - last_mode_retry_ms >= MODE_RETRY_INTERVAL_MS)) {
+        sendMavlinkSetMode(MODE_AUTO);
+        queue_statustext("Запуск місії (AUTO)");
+        mode_cmd_sent = true;
+        last_mode_retry_ms = now;
+      }
+
+      if (current_custom_mode == MODE_AUTO) {
+        state = STATE_MISSION;
+      }
+      break;
+    }
+
+    // --------------------------------------------------
+    //  STATE 11: MISSION — Місія виконується
+    // --------------------------------------------------
+    case STATE_MISSION: {
+      if (!mission_start_msg) {
+        queue_statustext("Режим AUTO — місія виконується");
+        mission_start_msg = true;
+      }
+
+      // Вихід із AUTO під час польоту — місія завершена/перервана
+      if (current_custom_mode == MODE_AUTO) was_in_auto = true;
+      
+      bool mission_ended = (was_in_auto && current_custom_mode != MODE_AUTO) || !is_armed;
+      if (mission_ended || crash_triggered) {
+        queue_statustext("Місія завершена. Реле.");
+        state = STATE_RELAY_CONTROL;
+      }
+      break;
+    }
+
+    // --------------------------------------------------
+    //  STATE 12: RELAY_CONTROL — Реле / Краш
+    // --------------------------------------------------
+    case STATE_RELAY_CONTROL: {
+      static bool relay_sent = false;
+      if (!relay_sent) {
+        sendMavlinkSetRelay();
+        queue_statustext("Relay ON");
+        relay_sent = true;
+      }
+      break;
+    }
+
+    default:
+      break;
+  }
+}
+
+// ============================================================
+//                      SETUP
+// ============================================================
+void setup() {
+  Serial.begin(115200);
+  delay(100);
+
+  loadConfig();
+  fcBegin(cfg.baud, 44, 43);
+  delay(50);
+
+  pixels.begin();
+  pixels.setBrightness(10);
+  pixels.clear();
+  setLed(LED_BLUE);
+  delay(300);
+  setLed(LED_OFF);
+
+  WiFi.persistent(false);
+  pinMode(BOOT_BTN, INPUT_PULLUP);
+
+  if (cfg.wifi_boot) {
+    wifiActivate();
+  } else {
+    wifiOn = false;
+  }
+
+  start_time = millis();
+  state_entry_ms = start_time;
+
+  Serial.println("\n=== ESP32-S3 DroneBridge FSM v3 ===");
+  queue_statustext("ESP32-S3 Bridge Ready");
+}
+
+// ============================================================
+//                       LOOP
+// ============================================================
+void loop() {
+  unsigned long now = millis();
+
+  handleTerminalConfig();
+
+  if (wifiOn) bridgeWiFiToFC();
+  bridgeFCtoWiFi();
+
+  if (now - last_wifi_hb >= 1000) {
+    send_heartbeat();
+    send_queued_statustext();
+    last_wifi_hb = now;
+  }
+
+  static unsigned long btn_time = 0;
+  if (!digitalRead(BOOT_BTN) && now - btn_time > 500) {
+    delay(50);
+    if (!digitalRead(BOOT_BTN)) {
+      if (wifiOn) wifiDeactivate(); else wifiActivate();
+      btn_time = now;
     }
   }
 
-  bootSequence();
-  mdFly();
-
-  if (wifiActivating && WiFi.status() == WL_CONNECTED) {
-    wifiActivating = false;
-    staRetryCount = 0;
-    staWasConnected = true;
-    Serial.printf("STA Connected successfully! IP: %s\n", WiFi.localIP().toString().c_str());
-    queue_statustext("WiFi STA OK");
-  }
-
-
-
-  if (wifiActivating && now - wifiActivateTime > 20000) {
-    staRetryCount++;
-    if (staRetryCount <= 10) {
-      Serial.printf("STA connection timeout. Retry %d/10...\n", staRetryCount);
-      WiFi.begin(cfg.sta_ssid, cfg.sta_pass);
-      wifiActivateTime = now;
-    } else {
-      wifiActivating = false;
-      Serial.println("STA connection failed after 10 retries. Sleeping.");
-    }
-  }
-
-  if (staWasConnected && WiFi.status() != WL_CONNECTED && wifiOn && now - last_sta_reconnect >= 15000) {
-    last_sta_reconnect = now;
-    WiFi.reconnect();
-    Serial.println("Link lost. Reconnecting to router...");
-  }
-
+  updateSystemState();
   updateLED();
 
+  // WiFi: статус підключення
   int st = WiFi.status();
+
+  if (wifiActivating && st == WL_CONNECTED) {
+    wifiActivating = false;
+    staWasConnected = true;
+    hasWifi = true;
+    char buf[48];
+    snprintf(buf, sizeof(buf), "WiFi: %s", WiFi.SSID().c_str());
+    queue_statustext(buf);
+  }
+
+  if (wifiActivating && now - wifiTryStart > 20000) {
+    tryNextWifi();
+  }
+
+  // WiFi: реконект (3 фази): reconnect 15с, через 30с escalate до tryNextWifi
+  static int wifi_recon_phase = 0;
+  if (wifiOn) {
+    if (st == WL_CONNECTED) {
+      wifi_recon_phase = 0;
+    } else if (staWasConnected) {
+      if (wifi_recon_phase == 0) {
+        wifi_recon_phase = 1;
+        recon_phase_start = now;
+        last_sta_reconnect = now;
+      } else if (wifi_recon_phase == 1 && now - last_sta_reconnect > 15000) {
+        WiFi.reconnect();
+        last_sta_reconnect = now;
+      }
+      if (wifi_recon_phase == 1 && now - recon_phase_start > 30000) {
+        wifi_recon_phase = 2;
+        recon_phase_start = now;
+        last_sta_reconnect = now;
+      }
+      if (wifi_recon_phase == 2 && now - last_sta_reconnect > 15000) {
+        tryNextWifi();
+        wifi_recon_phase = 1;
+        recon_phase_start = now;
+        last_sta_reconnect = now;
+      }
+    }
+  }
+
   if (st != last_sta_status && wifiOn) {
     last_sta_status = st;
     if (st == WL_CONNECTED) {
       staWasConnected = true;
-      queue_statustext(String("STA IP: " + WiFi.localIP().toString()).c_str());
-    } else if (st == WL_CONNECT_FAILED)
-      queue_statustext("STA FAIL: check password");
-    else if (st == WL_NO_SSID_AVAIL)
-      queue_statustext("STA FAIL: no SSID found");
+      hasWifi = true;
+      wifi_recon_phase = 0;
+    } else {
+      hasWifi = false;
+    }
   }
 
-  if (now - last_serial_log >= 5000) {
-    Serial.printf("hb=%d arm=%d mode=%d wifi_power=%d sta_status=%d wa=%d fc_bytes=%u fc_msgs=%u\n",
-                  heartbeat_received, is_armed, current_custom_mode, wifiOn, WiFi.status(), wifiActivating, fc_bytes, fc_msgs);
+  if (hasServer && now - last_server_pkt_ms > 30000) {
+    hasServer = false;
+  }
+
+  if (now - last_serial_log >= 10000) {
+    Serial.printf("s=%d h=%d a=%d m=%u w=%d f=%d ekf=0x%04X mag=%.2f fc=%u/%u\n",
+                  state, heartbeat_received, is_armed, current_custom_mode,
+                  st, mdfly, ekf_flags, mag_test_ratio, fc_bytes, fc_msgs);
     last_serial_log = now;
   }
-
-  delay(2);
-} 
+}
