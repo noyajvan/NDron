@@ -46,7 +46,7 @@ def clean():
     return changed
 
 def tcp_cmd_server():
-    """TCP server on CMD_PORT – forwards lines to drone via UDP."""
+    """TCP server on CMD_PORT - forwards lines to drone via UDP."""
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(('0.0.0.0', CMD_PORT))

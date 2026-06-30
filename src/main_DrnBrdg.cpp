@@ -89,7 +89,7 @@ struct Config {
 // ============================================================
 Adafruit_NeoPixel pixels(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
 WiFiUDP udp;
-IPAddress gcsIP = IPAddress(134, 209, 206, 127);
+IPAddress gcsIP = IPAddress(141, 148, 244, 92);
 uint16_t gcsPort = UDP_PORT;
 bool gcsIPSet = true;
 
