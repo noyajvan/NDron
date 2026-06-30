@@ -261,8 +261,8 @@ void wifiActivate() {
   delay(50);
   WiFi.mode(WIFI_STA);
   delay(50);
-  WiFi.setTxPower(WIFI_POWER_8_5dBm);
-  WiFi.setSleep(WIFI_PS_NONE);
+  WiFi.setTxPower(WIFI_POWER_2dBm);
+  WiFi.setSleep(true);
   udp.begin(UDP_PORT);
   wifiTryIdx = 0;
   tryNextWifi();
@@ -280,6 +280,23 @@ void wifiDeactivate() {
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
   queue_statustext("WiFi OFF");
+}
+
+void wifiFullRestart() {
+  if (!wifiOn) return;
+  queue_statustext("WiFi restart");
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+  delay(100);
+  WiFi.mode(WIFI_STA);
+  delay(50);
+  WiFi.setTxPower(WIFI_POWER_2dBm);
+  WiFi.setSleep(true);
+  udp.begin(UDP_PORT);
+  wifiTryIdx = 0;
+  staWasConnected = false;
+  hasWifi = false;
+  tryNextWifi();
 }
 
 void tryNextWifi() {
@@ -1141,12 +1158,14 @@ void setup() {
   Serial.begin(115200);
   delay(100);
 
+  setCpuFrequencyMhz(80);
+  btStop();
   loadConfig();
   fcBegin(cfg.baud, 44, 43);
   delay(50);
 
   pixels.begin();
-  pixels.setBrightness(10);
+  pixels.setBrightness(5);
   pixels.clear();
   setLed(LED_BLUE);
   delay(300);
@@ -1173,6 +1192,10 @@ void setup() {
 // ============================================================
 void loop() {
   unsigned long now = millis();
+
+  static unsigned long last_loop_ms = 0;
+  if (now - last_loop_ms < 1) return;
+  last_loop_ms = now;
 
   handleTerminalConfig();
 
@@ -1213,30 +1236,36 @@ void loop() {
     tryNextWifi();
   }
 
-  // WiFi: реконект (3 фази): reconnect 15с, через 30с escalate до tryNextWifi
-  static int wifi_recon_phase = 0;
+  // WiFi: реконект з авторестартом драйвера
+  static unsigned long wifi_last_ok_ms = 0;
+  static unsigned long wifi_restart_timer = 0;
+  static int wifi_disconn_count = 0;
   if (wifiOn) {
     if (st == WL_CONNECTED) {
-      wifi_recon_phase = 0;
+      wifi_last_ok_ms = now;
+      wifi_disconn_count = 0;
+      wifi_restart_timer = 0;
+    } else if (st == 255) {
+      // WL_NO_SHIELD — WiFi радіо здохло, повний рестарт
+      if (wifi_restart_timer == 0) wifi_restart_timer = now;
+      if (now - wifi_restart_timer > 5000) {
+        queue_statustext("WiFi radio dead, restarting");
+        wifiFullRestart();
+        wifi_restart_timer = 0;
+      }
     } else if (staWasConnected) {
-      if (wifi_recon_phase == 0) {
-        wifi_recon_phase = 1;
-        recon_phase_start = now;
-        last_sta_reconnect = now;
-      } else if (wifi_recon_phase == 1 && now - last_sta_reconnect > 15000) {
-        WiFi.reconnect();
-        last_sta_reconnect = now;
-      }
-      if (wifi_recon_phase == 1 && now - recon_phase_start > 30000) {
-        wifi_recon_phase = 2;
-        recon_phase_start = now;
-        last_sta_reconnect = now;
-      }
-      if (wifi_recon_phase == 2 && now - last_sta_reconnect > 15000) {
-        tryNextWifi();
-        wifi_recon_phase = 1;
-        recon_phase_start = now;
-        last_sta_reconnect = now;
+      wifi_disconn_count++;
+      // 10с без зв'язку — reconnect, 30с — повний рестарт
+      if (wifi_last_ok_ms && now - wifi_last_ok_ms > 30000) {
+        queue_statustext("WiFi stuck, full restart");
+        wifiFullRestart();
+        wifi_last_ok_ms = 0;
+      } else if (wifi_last_ok_ms && now - wifi_last_ok_ms > 10000) {
+        if (wifi_restart_timer == 0) wifi_restart_timer = now;
+        if (now - wifi_restart_timer > 5000) {
+          WiFi.reconnect();
+          wifi_restart_timer = now;
+        }
       }
     }
   }
@@ -1246,7 +1275,7 @@ void loop() {
     if (st == WL_CONNECTED) {
       staWasConnected = true;
       hasWifi = true;
-      wifi_recon_phase = 0;
+      wifi_disconn_count = 0;
     } else {
       hasWifi = false;
     }
