@@ -442,6 +442,21 @@ void sendPreflightStorage() {
 //               MAVLink  ПРИЙОМ / ОБРОБКА
 // ============================================================
 static bool crash_triggered = false;
+void saveConfig();
+
+static void send_param_ext_value(uint8_t idx, const char* id, const char* val) {
+  mavlink_msg_param_ext_value_pack(cfg.sys_id, COMP_ID, &txMsg,
+      id, val, MAV_PARAM_EXT_TYPE_CUSTOM, idx, 3);
+  uint16_t len = mavlink_msg_to_send_buffer(txBuf, &txMsg);
+  sendToBoth(txBuf, len);
+}
+
+static void send_param_ext_ack(const char* val, uint8_t type, uint8_t result) {
+  mavlink_msg_param_ext_ack_pack(cfg.sys_id, COMP_ID, &txMsg,
+      "", val, type, result);
+  uint16_t len = mavlink_msg_to_send_buffer(txBuf, &txMsg);
+  sendToBoth(txBuf, len);
+}
 
 void handle_mavlink_message(mavlink_message_t* msg) {
   switch (msg->msgid) {
@@ -475,142 +490,60 @@ void handle_mavlink_message(mavlink_message_t* msg) {
       break;
     }
 
-    case MAVLINK_MSG_ID_ATTITUDE: {
-      mavlink_attitude_t att;
-      mavlink_msg_attitude_decode(msg, &att);
-      roll_deg  = att.roll  * 57.2958f;
-      pitch_deg = att.pitch * 57.2958f;
-      static uint32_t lastAttDbg = 0;
-      if (millis() - lastAttDbg > 5000) {
-        lastAttDbg = millis();
-        Serial.printf("[ATT] r=%.1f p=%.1f\n", roll_deg, pitch_deg);
-      }
+    case MAVLINK_MSG_ID_PARAM_EXT_REQUEST_LIST: {
+      send_param_ext_value(0, "ESP_SSID", cfg.sta_ssid);
+      send_param_ext_value(1, "ESP_PASS", cfg.sta_pass);
+      char wifi_val[17];
+      snprintf(wifi_val, sizeof(wifi_val), "%u", wifiOn ? 1u : 0u);
+      send_param_ext_value(2, "ESP_WIFI", wifi_val);
       break;
     }
 
-    case MAVLINK_MSG_ID_RAW_IMU: {
-      mavlink_raw_imu_t imu;
-      mavlink_msg_raw_imu_decode(msg, &imu);
-      // Краш-детекція (перекидання)
-      static unsigned long gyro_crash_timer = 0;
-      if (!crash_triggered && is_armed) {
-        if (abs(imu.xgyro) > 4500 || abs(imu.ygyro) > 4500 || abs(imu.zgyro) > 4500) {
-          if (gyro_crash_timer == 0) gyro_crash_timer = millis();
-          if (millis() - gyro_crash_timer > 150) {
-            crash_triggered = true;
-            sendMavlinkForceDisarm();
-            queue_statustext("Crash: tumble");
-          }
-        } else {
-          gyro_crash_timer = 0;
+    case MAVLINK_MSG_ID_PARAM_EXT_SET: {
+      mavlink_param_ext_set_t s;
+      mavlink_msg_param_ext_set_decode(msg, &s);
+      char id[17];
+      strncpy(id, s.param_id, 16);
+      id[16] = '\0';
+      if (strcmp(id, "ESP_SSID") == 0) {
+        strncpy(cfg.sta_ssid, s.param_value, sizeof(cfg.sta_ssid) - 1);
+        cfg.sta_ssid[sizeof(cfg.sta_ssid) - 1] = '\0';
+        queue_statustext("ESP_SSID set");
+        send_param_ext_ack(s.param_value, MAV_PARAM_EXT_TYPE_CUSTOM, 0);
+      } else if (strcmp(id, "ESP_PASS") == 0) {
+        strncpy(cfg.sta_pass, s.param_value, sizeof(cfg.sta_pass) - 1);
+        cfg.sta_pass[sizeof(cfg.sta_pass) - 1] = '\0';
+        queue_statustext("ESP_PASS set");
+        send_param_ext_ack(s.param_value, MAV_PARAM_EXT_TYPE_CUSTOM, 0);
+      } else if (strcmp(id, "ESP_WIFI") == 0) {
+        uint8_t val = atoi(s.param_value);
+        if (val == 1 && !wifiOn) {
+          wifiActivate();
+        } else if (val == 0 && wifiOn) {
+          wifiDeactivate();
         }
-      }
-      break;
-    }
-
-    case MAVLINK_MSG_ID_VFR_HUD: {
-      mavlink_vfr_hud_t vfr;
-      mavlink_msg_vfr_hud_decode(msg, &vfr);
-      // Краш-детекція (застрягання)
-      static float last_alt = 0.0f;
-      static unsigned long stuck_timer = 0;
-      static bool wasFlying = false;
-      if (is_armed && vfr.alt > 2.0f) wasFlying = true;
-      if (!crash_triggered && wasFlying && is_armed) {
-        if (fabs(vfr.alt - last_alt) < 0.15f && vfr.groundspeed < 0.15f) {
-          if (stuck_timer == 0) stuck_timer = millis();
-          if (millis() - stuck_timer > 3000 && vfr.throttle > 45) {
-            crash_triggered = true;
-            sendMavlinkForceDisarm();
-            queue_statustext("Crash: stuck");
-          }
-        } else {
-          stuck_timer = 0;
-          last_alt = vfr.alt;
-        }
-      }
-      break;
-    }
-
-    case MAVLINK_MSG_ID_EKF_STATUS_REPORT: {
-      mavlink_ekf_status_report_t ekf;
-      mavlink_msg_ekf_status_report_decode(msg, &ekf);
-      ekf_flags = ekf.flags;
-      mag_test_ratio = ekf.compass_variance;
-      ekf_report_received = true;
-      break;
-    }
-
-    case MAVLINK_MSG_ID_MISSION_COUNT: {
-      mavlink_mission_count_t mc;
-      mavlink_msg_mission_count_decode(msg, &mc);
-      mission_count = mc.count;
-      mission_loaded = false;
-      if (mission_count > 0) {
-        send_mission_request_int(0);
+        saveConfig();
+        queue_statustext("WiFi saved");
+        send_param_ext_ack(s.param_value, MAV_PARAM_EXT_TYPE_UINT8, 0);
+        delay(500);
+        ESP.restart();
       } else {
-        missionFirstParsed = true;
-        lastMissionReq = 0;
+        send_param_ext_ack("", 0, 1);
       }
       break;
     }
 
-    case MAVLINK_MSG_ID_MISSION_ITEM_INT: {
-      mavlink_mission_item_int_t item;
-      mavlink_msg_mission_item_int_decode(msg, &item);
-      if (item.seq + 1 < mission_count) {
-        send_mission_request_int(item.seq + 1);
-      } else {
-        mission_loaded = true;
-        missionFirstParsed = true;
-        lastMissionReq = 0;
-      }
-      break;
-    }
-
-    case MAVLINK_MSG_ID_SYS_STATUS: {
-      mavlink_sys_status_t st;
-      mavlink_msg_sys_status_decode(msg, &st);
-      battery_voltage = st.voltage_battery * 0.001f;
-      battery_remaining = st.battery_remaining;
-      sys_status_received = true;
-      break;
-    }
-
-    case MAVLINK_MSG_ID_GPS_RAW_INT: {
-      mavlink_gps_raw_int_t gps;
-      mavlink_msg_gps_raw_int_decode(msg, &gps);
-      gps_fix_type = gps.fix_type;
-      gps_sats = gps.satellites_visible;
-      break;
-    }
-
-    case MAVLINK_MSG_ID_MAG_CAL_PROGRESS: {
-      mavlink_mag_cal_progress_t c;
-      mavlink_msg_mag_cal_progress_decode(msg, &c);
-      cal_completion_pct = c.completion_pct;
-      // MAG_CAL_STATUS з common.xml: 0=NOT_STARTED,1=WAITING,2=STEP1,3=STEP2,
-      //   4=SUCCESS,5=FAILED,6=BAD_ORIENT,7=BAD_RADIUS
-      // SUCCESS, BAD_ORIENT, BAD_RADIUS — усі фінальні (autosave зберігає дані)
-      cal_success = (c.cal_status == 4 || c.cal_status == 6 || c.cal_status == 7);
-      static uint8_t last_status = 255;
-      if (c.cal_status != last_status) {
-        last_status = c.cal_status;
-        Serial.printf("[CAL] pct=%u status=%d succ=%d\n", c.completion_pct, c.cal_status, cal_success);
-      }
-      break;
-    }
-
-    case MAVLINK_MSG_ID_STATUSTEXT: {
-      mavlink_statustext_t stxt;
-      mavlink_msg_statustext_decode(msg, &stxt);
-      // Збираємо повідомлення з важливістю <= WARNING
-      if (stxt.severity <= MAV_SEVERITY_WARNING) {
-        uint8_t next = (rq_write + 1) % REASON_QUEUE_SIZE;
-        if (next == rq_read) rq_read = (rq_read + 1) % REASON_QUEUE_SIZE;
-        strncpy(reason_queue[rq_write], stxt.text, 71);
-        reason_queue[rq_write][71] = '\0';
-        rq_write = next;
+    case MAVLINK_MSG_ID_PARAM_EXT_REQUEST_READ: {
+      mavlink_param_ext_request_read_t r;
+      mavlink_msg_param_ext_request_read_decode(msg, &r);
+      if (r.param_index == 0 || strncmp(r.param_id, "ESP_SSID", 16) == 0) {
+        send_param_ext_value(0, "ESP_SSID", cfg.sta_ssid);
+      } else if (r.param_index == 1 || strncmp(r.param_id, "ESP_PASS", 16) == 0) {
+        send_param_ext_value(1, "ESP_PASS", cfg.sta_pass);
+      } else if (r.param_index == 2 || strncmp(r.param_id, "ESP_WIFI", 16) == 0) {
+        char wifi_val[17];
+        snprintf(wifi_val, sizeof(wifi_val), "%u", wifiOn ? 1u : 0u);
+        send_param_ext_value(2, "ESP_WIFI", wifi_val);
       }
       break;
     }
@@ -658,6 +591,19 @@ void bridgeWiFiToFC() {
     }
     int n = udp.read(bridgeBuf, sizeof(bridgeBuf));
     if (n <= 0) return;
+    // Перехоплюємо MAVLink пакети для ESP (PARAM_EXT_SET/REQUEST_LIST)
+    mavlink_message_t gcsMsg;
+    mavlink_status_t gcsStatus;
+    for (int i = 0; i < n; i++) {
+      if (mavlink_parse_char(MAVLINK_COMM_1, bridgeBuf[i], &gcsMsg, &gcsStatus)) {
+        if (gcsMsg.msgid == MAVLINK_MSG_ID_PARAM_EXT_REQUEST_LIST ||
+            gcsMsg.msgid == MAVLINK_MSG_ID_PARAM_EXT_SET ||
+            gcsMsg.msgid == MAVLINK_MSG_ID_PARAM_EXT_REQUEST_READ) {
+          handle_mavlink_message(&gcsMsg);
+          return;
+        }
+      }
+    }
     fcWrite(bridgeBuf, n);
   }
 }
