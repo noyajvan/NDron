@@ -548,6 +548,18 @@ void handle_mavlink_message(mavlink_message_t* msg) {
       break;
     }
 
+    case MAVLINK_MSG_ID_COMMAND_LONG: {
+      mavlink_command_long_t cmd;
+      mavlink_msg_command_long_decode(msg, &cmd);
+      if (cmd.command == MAV_CMD_PREFLIGHT_STORAGE && (int)cmd.param1 == 2) {
+        saveConfig();
+        queue_statustext("WiFi config saved");
+        delay(500);
+        ESP.restart();
+      }
+      break;
+    }
+
     default:
       break;
   }
@@ -591,14 +603,15 @@ void bridgeWiFiToFC() {
     }
     int n = udp.read(bridgeBuf, sizeof(bridgeBuf));
     if (n <= 0) return;
-    // Перехоплюємо MAVLink пакети для ESP (PARAM_EXT_SET/REQUEST_LIST)
+    // Перехоплюємо MAVLink для ESP (COMMAND_LONG та PARAM_EXT)
     mavlink_message_t gcsMsg;
     mavlink_status_t gcsStatus;
     for (int i = 0; i < n; i++) {
       if (mavlink_parse_char(MAVLINK_COMM_1, bridgeBuf[i], &gcsMsg, &gcsStatus)) {
         if (gcsMsg.msgid == MAVLINK_MSG_ID_PARAM_EXT_REQUEST_LIST ||
             gcsMsg.msgid == MAVLINK_MSG_ID_PARAM_EXT_SET ||
-            gcsMsg.msgid == MAVLINK_MSG_ID_PARAM_EXT_REQUEST_READ) {
+            gcsMsg.msgid == MAVLINK_MSG_ID_PARAM_EXT_REQUEST_READ ||
+            gcsMsg.msgid == MAVLINK_MSG_ID_COMMAND_LONG) {
           handle_mavlink_message(&gcsMsg);
           return;
         }
