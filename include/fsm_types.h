@@ -13,7 +13,6 @@
 // Піни
 #define LED_PIN         48
 #define NUM_LEDS        1
-#define BOOT_BTN        0
 #define FC_UART_NUM     0
 
 // Буфери

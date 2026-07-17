@@ -121,4 +121,3 @@ while True:
         sys.stderr.flush()
         pkt_count = 0
         last_log = now
-

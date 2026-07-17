@@ -113,7 +113,6 @@ void setup() {
   setLed(LED_OFF);
 
   WiFi.persistent(false);
-  pinMode(BOOT_BTN, INPUT_PULLUP);
 
   if (strlen(cfg.sta_ssid) > 0) {
     wifiActivate();
@@ -152,15 +151,6 @@ void loop() {
     send_heartbeat();
     send_queued_statustext();
     last_wifi_hb = now;
-  }
-
-  static unsigned long btn_time = 0;
-  if (!digitalRead(BOOT_BTN) && now - btn_time > 500) {
-    delay(50);
-    if (!digitalRead(BOOT_BTN)) {
-      if (wifiOn) wifiDeactivate(); else wifiActivate();
-      btn_time = now;
-    }
   }
 
   updateSystemState();
