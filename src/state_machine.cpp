@@ -6,6 +6,7 @@
 
 extern bool crash_triggered;
 uint8_t last_cal_pct = 0;
+bool flew_above_1m = false;
 
 void updateSystemState() {
   unsigned long now = millis();
@@ -65,11 +66,10 @@ void updateSystemState() {
         break;
       case STATE_NO_ARM:
         no_arm_init = false;
-        queue_statustext("check arm conditions");
+        sendMavlinkArm();
+        queue_statustext("ARM >>");
         break;
       case STATE_ARMING:
-        arm_cmd_sent = false;
-        last_arm_retry_ms = 0;
         break;
       case STATE_START_MISSION:
         mode_cmd_sent = false;
@@ -78,6 +78,9 @@ void updateSystemState() {
       case STATE_MISSION:
         mission_start_msg = false;
         was_in_auto = false;
+        flew_above_1m = false;
+        break;
+      case STATE_RELAY_CONTROL:
         break;
       default:
         break;
@@ -210,98 +213,40 @@ void updateSystemState() {
 
       if (!no_arm_init) {
         send_mission_request_list();
-        queue_statustext("check arm conditions");
         no_arm_init = true;
       }
 
-      static uint8_t  last_gps_fix = 255;
-      static uint8_t  last_sats   = 255;
-      static int8_t   last_bat_pct = -2;
-      static bool     last_mis_loaded = false;
-      if (now - last_reason_report_ms >= REASON_REPORT_MS) {
-        last_reason_report_ms = now;
-        while (rq_read != rq_write) {
-          queue_statustext(reason_queue[rq_read]);
-          rq_read = (rq_read + 1) % REASON_QUEUE_SIZE;
-        }
-        if (mission_loaded != last_mis_loaded) {
-          last_mis_loaded = mission_loaded;
-          queue_statustext(mission_loaded ? "Mission loaded" : "Mission NOT loaded");
-        }
-        if (gps_fix_type != last_gps_fix || gps_sats != last_sats || battery_remaining != last_bat_pct) {
-          last_gps_fix = gps_fix_type;
-          last_sats = gps_sats;
-          last_bat_pct = battery_remaining;
-          char buf[48];
-          snprintf(buf, sizeof(buf), "GPS:%d/%d", gps_fix_type, gps_sats);
-          queue_statustext(buf);
-          snprintf(buf, sizeof(buf), "Bat:%.1fV %d%%", battery_voltage, battery_remaining);
-          queue_statustext(buf);
-        }
+      if (now - state_entry_ms >= 5000) {
+        sendMavlinkArm();
+        queue_statustext("ARM >>");
+        state_entry_ms = now;
       }
 
-      bool gps_ok = (gps_fix_type >= 3);
-      bool bat_ok = sys_status_received &&
-                    (battery_voltage > 10.5f || battery_voltage < 0.01f);
-      if (system_status == MAV_STATE_STANDBY && mission_loaded && gps_ok && bat_ok) {
+      if (is_armed) {
         state = STATE_ARMING;
       }
       break;
     }
 
     case STATE_ARMING: {
-      if (!is_armed && now - state_entry_ms > 3000) {
-        queue_statustext("disarmed -> back to NO_ARM");
-        state = STATE_NO_ARM;
-        break;
-      }
-      if (!arm_cmd_sent || (now - last_arm_retry_ms >= ARM_RETRY_INTERVAL_MS)) {
-        sendMavlinkArm();
-        queue_statustext("sending ARM command");
-        arm_cmd_sent = true;
-        last_arm_retry_ms = now;
-      }
-      if (is_armed) {
-        state = STATE_ARMED;
-      }
-      break;
-    }
-
-    case STATE_ARMED: {
       if (!is_armed) {
-        queue_statustext("disarmed -> back to NO_ARM");
+        queue_statustext("disarmed -> NO_ARM");
         state = STATE_NO_ARM;
         break;
       }
-      bool mission_ready = mission_loaded && missionFirstParsed;
-      if (mission_ready) {
-        state = STATE_START_MISSION;
-      } else {
-        if (now - last_reason_report_ms >= REASON_REPORT_MS) {
-          last_reason_report_ms = now;
-          while (rq_read != rq_write) {
-            queue_statustext(reason_queue[rq_read]);
-            rq_read = (rq_read + 1) % REASON_QUEUE_SIZE;
-          }
-          if (!mission_loaded) queue_statustext("Mission NOT loaded");
+
+      bool can_auto = mission_loaded && missionFirstParsed && gps_fix_type >= 3;
+      if (can_auto) {
+        static bool auto_sent = false;
+        if (!auto_sent || (now - state_entry_ms >= 20000)) {
+          sendMavlinkSetMode(MODE_AUTO);
+          queue_statustext("AUTO >>");
+          auto_sent = true;
+          state_entry_ms = now;
         }
       }
-      break;
-    }
 
-    case STATE_START_MISSION: {
-      if (!is_armed) {
-        queue_statustext("disarmed -> back to NO_ARM");
-        state = STATE_NO_ARM;
-        break;
-      }
-      if (!mode_cmd_sent || (now - last_mode_retry_ms >= MODE_RETRY_INTERVAL_MS)) {
-        sendMavlinkSetMode(MODE_AUTO);
-        queue_statustext("switch to AUTO mode");
-        mode_cmd_sent = true;
-        last_mode_retry_ms = now;
-      }
-      if (current_custom_mode == MODE_AUTO) {
+      if (is_armed && current_custom_mode == MODE_AUTO) {
         state = STATE_MISSION;
       }
       break;
@@ -309,30 +254,31 @@ void updateSystemState() {
 
     case STATE_MISSION: {
       if (!mission_start_msg) {
-        queue_statustext("AUTO mode - mission running");
+        queue_statustext("START");
         mission_start_msg = true;
+      }
+      if (vfr_alt > 1.0f) {
+        flew_above_1m = true;
       }
       if (current_custom_mode == MODE_AUTO) was_in_auto = true;
 
-      bool mode_changed = (was_in_auto && current_custom_mode != MODE_AUTO);
-      bool mission_ended = mode_changed || !is_armed;
+      bool mission_ended = !is_armed || (was_in_auto && current_custom_mode != MODE_AUTO);
 
       if (mission_ended || crash_triggered) {
-        const char* m = mode_changed ? "mission ended, relay ON" : "mission disarmed, relay ON";
-        queue_statustext(m);
+        if (flew_above_1m) {
+          sendMavlinkSetRelay();
+          sendMavlinkForceDisarm();
+          queue_statustext("Relay");
+        } else {
+          sendMavlinkForceDisarm();
+          queue_statustext("Disarmed, no relay");
+        }
         state = STATE_RELAY_CONTROL;
       }
       break;
     }
 
     case STATE_RELAY_CONTROL: {
-      static bool relay_sent = false;
-      if (!relay_sent) {
-        sendMavlinkSetRelay();
-        sendMavlinkForceDisarm();
-        queue_statustext("Relay ON + DISARM");
-        relay_sent = true;
-      }
       break;
     }
 

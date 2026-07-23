@@ -57,12 +57,13 @@ void updateLED() {
       break;
 
     case STATE_NO_ARM:
-    case STATE_ARMING:
       setLed((now % 1000) < 500 ? LED_YELLOW : LED_OFF);
       break;
 
-    case STATE_ARMED:
-    case STATE_START_MISSION:
+    case STATE_ARMING:
+      setLed((now % 1000) < 500 ? LED_GREEN : LED_OFF);
+      break;
+
     case STATE_MISSION:
       setLed(LED_GREEN);
       break;

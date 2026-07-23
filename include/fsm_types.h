@@ -136,6 +136,7 @@ extern bool arm_cmd_sent;
 extern bool mode_cmd_sent;
 extern bool mission_start_msg;
 extern bool was_in_auto;
+extern bool flew_above_1m;
 
 extern uint16_t mission_count;
 extern bool mission_loaded;
