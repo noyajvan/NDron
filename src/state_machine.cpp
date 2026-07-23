@@ -185,10 +185,6 @@ void updateSystemState() {
         state = STATE_CALIBRATION_END;
         break;
       }
-      if (now - state_entry_ms > 60000) {
-        send_statustext_udp("Bridge: calibration timeout");
-        state = STATE_NO_ARM;
-      }
       break;
     }
 
@@ -196,6 +192,7 @@ void updateSystemState() {
       if (!cal_finalized) {
         sendAcceptMagCal();
         sendPreflightStorage();
+        queue_statustext("calibration complete");
         send_statustext_udp("Bridge: calibration complete");
         mdfly = 60;
         cal_finalized = true;
