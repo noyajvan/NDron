@@ -5,6 +5,7 @@
 #include "wifi_mgr.h"
 
 extern bool crash_triggered;
+uint8_t last_cal_pct = 0;
 
 void updateSystemState() {
   unsigned long now = millis();
@@ -56,6 +57,7 @@ void updateSystemState() {
         cal_cmd_sent = false;
         cal_success = false;
         cal_completion_pct = 0;
+        last_cal_pct = 0;
         send_statustext_udp("Bridge: compass calibration");
         break;
       case STATE_CALIBRATION_END:
@@ -172,13 +174,11 @@ void updateSystemState() {
         send_statustext_udp("Bridge: calibration started");
         cal_cmd_sent = true;
       }
-      static uint8_t last_cal_pct = 0;
       if (cal_completion_pct > 0 && cal_completion_pct - last_cal_pct >= 10) {
         last_cal_pct = cal_completion_pct;
         char buf[32];
         snprintf(buf, sizeof(buf), "Cal: %d%%", cal_completion_pct);
         queue_statustext(buf);
-        send_statustext_udp(buf);
         send_statustext(buf);
       }
       if (cal_success) {
@@ -192,6 +192,7 @@ void updateSystemState() {
       if (!cal_finalized) {
         sendAcceptMagCal();
         sendPreflightStorage();
+        sendMavlinkReboot();
         queue_statustext("calibration complete");
         send_statustext_udp("Bridge: calibration complete");
         mdfly = 60;

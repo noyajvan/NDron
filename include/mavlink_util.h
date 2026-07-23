@@ -21,6 +21,7 @@ void sendMavlinkSetRelay();
 void sendStartMagCal();
 void sendAcceptMagCal();
 void sendPreflightStorage();
+void sendMavlinkReboot();
 void handle_mavlink_message(mavlink_message_t* msg);
 void bridgeFCtoWiFi();
 void bridgeWiFiToFC();

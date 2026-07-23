@@ -26,7 +26,7 @@ void fcWrite(const uint8_t* d, size_t len) {
 }
 
 void forwardToWiFi(const uint8_t* data, size_t len) {
-  if (!wifiOn || WiFi.status() != WL_CONNECTED) return;
+  if (!wifiOn || !staWasConnected) return;
   udp.beginPacket(gcsIP, gcsPort);
   udp.write(data, len);
   udp.endPacket();
@@ -45,7 +45,7 @@ void send_statustext(const char* text) {
 }
 
 void send_statustext_udp(const char* text) {
-  if (!wifiOn || WiFi.status() != WL_CONNECTED) return;
+  if (!wifiOn || !staWasConnected) return;
   mavlink_msg_statustext_pack(cfg.sys_id, COMP_ID, &txMsg,
       MAV_SEVERITY_INFO, text, 0, 0);
   uint16_t len = mavlink_msg_to_send_buffer(txBuf, &txMsg);
@@ -118,6 +118,11 @@ void sendAcceptMagCal() {
 
 void sendPreflightStorage() {
   send_command_long(MAV_CMD_PREFLIGHT_STORAGE, 1.0f, 0.0f,
+                    0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+}
+
+void sendMavlinkReboot() {
+  send_command_long(MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN, 1.0f, 0.0f,
                     0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
 }
 
@@ -212,7 +217,9 @@ void handle_mavlink_message(mavlink_message_t* msg) {
       mavlink_mag_cal_progress_t cal;
       mavlink_msg_mag_cal_progress_decode(msg, &cal);
       cal_completion_pct = cal.completion_pct;
+      Serial.printf("[CAL] status=%d pct=%d compass=%d\n", cal.cal_status, cal.completion_pct, cal.compass_id);
       if (cal.cal_status == 4) {
+        Serial.println("[CAL] SUCCESS");
         cal_success = true;
       }
       break;
@@ -221,7 +228,10 @@ void handle_mavlink_message(mavlink_message_t* msg) {
     case MAVLINK_MSG_ID_MAG_CAL_REPORT: {
       mavlink_mag_cal_report_t rep;
       mavlink_msg_mag_cal_report_decode(msg, &rep);
+      Serial.printf("[CAL] report status=%d fitness=%.2f ofs=(%.1f,%.1f,%.1f)\n",
+        rep.cal_status, rep.fitness, rep.ofs_x, rep.ofs_y, rep.ofs_z);
       if (rep.cal_status == 4) {
+        Serial.println("[CAL] REPORT SUCCESS");
         cal_success = true;
       }
       break;
@@ -271,7 +281,7 @@ void bridgeFCtoWiFi() {
 }
 
 void bridgeWiFiToFC() {
-  if (!wifiOn || WiFi.status() != WL_CONNECTED) return;
+  if (!wifiOn || !staWasConnected) return;
   int sz = udp.parsePacket();
   if (sz > 0) {
     last_server_pkt_ms = millis();

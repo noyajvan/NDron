@@ -130,6 +130,7 @@ extern bool cal_cmd_sent;
 extern bool cal_success;
 extern bool cal_finalized;
 extern uint8_t cal_completion_pct;
+extern uint8_t last_cal_pct;
 extern bool no_arm_init;
 extern bool arm_cmd_sent;
 extern bool mode_cmd_sent;
