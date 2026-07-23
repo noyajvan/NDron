@@ -44,6 +44,14 @@ void send_statustext(const char* text) {
   fcWrite(txBuf, len);
 }
 
+void send_statustext_udp(const char* text) {
+  if (!wifiOn || WiFi.status() != WL_CONNECTED) return;
+  mavlink_msg_statustext_pack(cfg.sys_id, COMP_ID, &txMsg,
+      MAV_SEVERITY_INFO, text, 0, 0);
+  uint16_t len = mavlink_msg_to_send_buffer(txBuf, &txMsg);
+  forwardToWiFi(txBuf, len);
+}
+
 void send_queued_statustext() {
   for (int i = 0; i < 5 && q_read != q_write; i++) {
     mavlink_msg_statustext_pack(cfg.sys_id, COMP_ID, &txMsg,

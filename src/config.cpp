@@ -9,6 +9,7 @@ void loadConfig() {
   p.getString("pass", cfg.sta_pass, sizeof(cfg.sta_pass));
   cfg.baud      = p.getUInt("baud", 921600);
   cfg.sys_id    = p.getUInt("sys_id", 1);
+  cfg.sys_id = 1;
   p.end();
 }
 

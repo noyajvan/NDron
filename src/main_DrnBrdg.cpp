@@ -165,6 +165,9 @@ void loop() {
     char buf[48];
     snprintf(buf, sizeof(buf), "WiFi: %s", WiFi.SSID().c_str());
     queue_statustext(buf);
+    send_statustext_udp(buf);
+    send_statustext_udp("Bridge Ready");
+    send_statustext_udp("Mavlink OK");
   }
 
   if (wifiActivating && now - wifiTryStart > 20000) {
