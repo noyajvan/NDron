@@ -1,53 +1,78 @@
+#include <math.h>
 #include "fsm_types.h"
 #include "led.h"
 
+#define PI_F 3.14159265f
+
 void setLed(uint32_t c) {
+  pixels.setBrightness(5);
   pixels.setPixelColor(0, c);
   pixels.show();
 }
 
-uint32_t getWifiCoColor() {
-  if (!wifiOn) return LED_OFF;
-  if (!hasWifi) return LED_WHITE;
-  if (!hasServer) return LED_CYAN;
-  return LED_BLUE;
-}
-
-uint32_t getMavCoColor() {
-  switch (state) {
-    case STATE_INIT_MAVLINK:
-      if (!heartbeat_received) return getWifiCoColor();
-      return LED_LILAC;
-    case STATE_MAG_ERROR:       return LED_CHERRY_D;
-    case STATE_MAG_OK:          return LED_MAGENTA;
-    case STATE_CALIBRATION:     return LED_MAGENTA;
-    case STATE_CALIBRATION_END: return LED_OFF;
-    case STATE_NO_ARM:
-    case STATE_ARMING:          return LED_YELLOW;
-    case STATE_ARMED:
-    case STATE_START_MISSION:   return LED_GREEN;
-    case STATE_MISSION:         return LED_GREEN;
-    case STATE_RELAY_CONTROL:   return LED_RED;
-    default: return LED_OFF;
-  }
+static void setLedBreathing(uint32_t color, unsigned long period_ms) {
+  float phase = (float)(millis() % period_ms) / period_ms * 2.0f * PI_F;
+  float brightness = (sin(phase - PI_F / 2.0f) + 1.0f) / 2.0f;
+  brightness = 0.4f + brightness * 0.6f;
+  pixels.setBrightness((uint8_t)(brightness * 5.0f));
+  pixels.setPixelColor(0, color);
+  pixels.show();
 }
 
 void updateLED() {
   if (mdfly == 60) { setLed(LED_OFF); return; }
-  if (state == STATE_MISSION) { setLed(LED_GREEN); return; }
-  if (state == STATE_CALIBRATION_END) { setLed(LED_OFF); return; }
-  if (state == STATE_MAG_ERROR || state == STATE_MAG_OK) {
-    setLed((millis() % 1250) < 250 ? getMavCoColor() : LED_OFF);
+  unsigned long now = millis();
+
+  if (!heartbeat_received) {
+    if (!hasServer) {
+      if (!wifiOn || !hasWifi) {
+        setLed((now % 1500) < 250 ? LED_WHITE : LED_OFF);
+      } else {
+        setLed((now % 1000) < 500 ? LED_WHITE : LED_OFF);
+      }
+    } else {
+      setLed(LED_WHITE);
+    }
     return;
   }
-  if (state == STATE_CALIBRATION) {
-    setLed((millis() % 500) < 250 ? LED_MAGENTA : LED_OFF);
-    return;
-  }
-  bool onPhase = (millis() % 1000) < 500;
-  if (state == STATE_INIT_WIFI) {
-    setLed(onPhase ? getWifiCoColor() : LED_OFF);
-  } else {
-    setLed(onPhase ? getMavCoColor() : LED_OFF);
+
+  switch (state) {
+    case STATE_INIT_MAVLINK:
+      setLedBreathing(LED_BLUE, 2000);
+      break;
+
+    case STATE_MAG_OK:
+      setLed((now % 1000) < 500 ? LED_BLUE : LED_OFF);
+      break;
+
+    case STATE_CALIBRATION: {
+      unsigned long period = 2000 - ((uint32_t)cal_completion_pct * 18);
+      if (period < 200) period = 200;
+      setLedBreathing(LED_CHERRY_D, period);
+      break;
+    }
+
+    case STATE_CALIBRATION_END:
+      setLed(LED_OFF);
+      break;
+
+    case STATE_NO_ARM:
+    case STATE_ARMING:
+      setLed((now % 1000) < 500 ? LED_YELLOW : LED_OFF);
+      break;
+
+    case STATE_ARMED:
+    case STATE_START_MISSION:
+    case STATE_MISSION:
+      setLed(LED_GREEN);
+      break;
+
+    case STATE_RELAY_CONTROL:
+      setLed((now % 1000) < 500 ? LED_RED : LED_OFF);
+      break;
+
+    default:
+      setLed(LED_OFF);
+      break;
   }
 }

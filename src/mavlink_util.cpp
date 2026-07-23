@@ -212,7 +212,16 @@ void handle_mavlink_message(mavlink_message_t* msg) {
       mavlink_mag_cal_progress_t cal;
       mavlink_msg_mag_cal_progress_decode(msg, &cal);
       cal_completion_pct = cal.completion_pct;
-      if (cal.cal_status >= 2) {
+      if (cal.cal_status == 4) {
+        cal_success = true;
+      }
+      break;
+    }
+
+    case MAVLINK_MSG_ID_MAG_CAL_REPORT: {
+      mavlink_mag_cal_report_t rep;
+      mavlink_msg_mag_cal_report_decode(msg, &rep);
+      if (rep.cal_status == 4) {
         cal_success = true;
       }
       break;
