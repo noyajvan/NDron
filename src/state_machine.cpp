@@ -195,9 +195,8 @@ void updateSystemState() {
       if (!cal_finalized) {
         sendAcceptMagCal();
         sendPreflightStorage();
-        sendMavlinkReboot();
-        queue_statustext("calibration complete");
-        send_statustext_udp("Bridge: calibration complete");
+        queue_statustext("calibration OK - power cycle FC");
+        send_statustext_udp("Bridge: calibration OK - power cycle FC");
         mdfly = 60;
         cal_finalized = true;
       }
