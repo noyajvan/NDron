@@ -28,6 +28,7 @@ void updateSystemState() {
     } else if (lastMissionReq && now - lastMissionReq > 5000) {
       missionFirstParsed = true;
       lastMissionReq = 0;
+      if (mission_count > 0) mission_loaded = true;
     }
   }
 
