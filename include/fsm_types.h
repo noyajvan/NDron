@@ -37,7 +37,9 @@
 #define EKF_ATTITUDE    0x01
 #define COMP_ID         MAV_COMP_ID_ONBOARD_COMPUTER
 #define MODE_STABILIZE  0
+#define MODE_ACRO       1
 #define MODE_AUTO       3
+#define MODE_LAND       9
 
 // Таймаути
 #define WIFI_TIMEOUT_MS         60000

@@ -17,6 +17,13 @@ void updateSystemState() {
     wifiDeactivate();
   }
 
+  if (current_custom_mode != MODE_STABILIZE && current_custom_mode != MODE_AUTO) {
+    if (mdfly != 60) {
+      mdfly = 60;
+      queue_statustext("mode != STAB/AUTO -> stop");
+      send_statustext_udp("Bridge: mode != STAB/AUTO -> stop");
+    }
+  }
   if (mdfly == 60) return;
 
   if (heartbeat_received && !missionFirstParsed) {
