@@ -287,11 +287,6 @@ void bridgeWiFiToFC() {
     last_server_pkt_ms = millis();
     if (!hasServer) {
       hasServer = true;
-      static unsigned long last_do_connect_msg = 0;
-      if (millis() - last_do_connect_msg > 60000) {
-        queue_statustext("DO connected");
-        last_do_connect_msg = millis();
-      }
     }
     int n = udp.read(bridgeBuf, sizeof(bridgeBuf));
     if (n <= 0) return;

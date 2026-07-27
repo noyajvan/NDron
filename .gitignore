@@ -6,3 +6,8 @@
 *.bak
 *.txt
 REFERENCE.md
+
+.env
+.kilo/kilo.jsonc
+.vscode/
+

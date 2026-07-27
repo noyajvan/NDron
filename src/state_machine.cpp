@@ -223,7 +223,7 @@ void updateSystemState() {
         no_arm_init = true;
       }
 
-      if (now - state_entry_ms >= 5000) {
+      if (gps_fix_type >= 3 && now - state_entry_ms >= 5000) {
         sendMavlinkArm();
         queue_statustext("ARM >>");
         state_entry_ms = now;
