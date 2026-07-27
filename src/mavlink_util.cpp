@@ -218,6 +218,10 @@ void handle_mavlink_message(mavlink_message_t* msg) {
       mavlink_msg_mag_cal_progress_decode(msg, &cal);
       cal_completion_pct = cal.completion_pct;
       Serial.printf("[CAL] status=%d pct=%d compass=%d\n", cal.cal_status, cal.completion_pct, cal.compass_id);
+      if (cal.cal_status == 4) {
+        Serial.println("[CAL] PROGRESS SUCCESS");
+        cal_success = true;
+      }
       break;
     }
 
