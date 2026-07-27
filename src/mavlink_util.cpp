@@ -233,6 +233,10 @@ void handle_mavlink_message(mavlink_message_t* msg) {
       if (rep.cal_status == 4) {
         Serial.println("[CAL] REPORT SUCCESS");
         cal_success = true;
+        char buf[72];
+        snprintf(buf, sizeof(buf), "DIA X=%.3f Y=%.3f Z=%.3f",
+          rep.diag_x, rep.diag_y, rep.diag_z);
+        queue_statustext(buf);
       }
       break;
     }
