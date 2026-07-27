@@ -236,10 +236,13 @@ void handle_mavlink_message(mavlink_message_t* msg) {
         cal_dia_y = rep.diag_y;
         cal_dia_z = rep.diag_z;
         cal_success = true;
-        char buf[72];
-        snprintf(buf, sizeof(buf), "DIA X=%.3f Y=%.3f Z=%.3f",
-          rep.diag_x, rep.diag_y, rep.diag_z);
-        queue_statustext(buf);
+        if (!cal_dia_reported) {
+          cal_dia_reported = true;
+          char buf[72];
+          snprintf(buf, sizeof(buf), "DIA X=%.3f Y=%.3f Z=%.3f",
+            rep.diag_x, rep.diag_y, rep.diag_z);
+          queue_statustext(buf);
+        }
       }
       break;
     }
