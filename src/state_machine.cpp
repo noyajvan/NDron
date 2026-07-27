@@ -74,8 +74,6 @@ void updateSystemState() {
         break;
       case STATE_NO_ARM:
         no_arm_init = false;
-        sendMavlinkArm();
-        queue_statustext("ARM >>");
         break;
       case STATE_ARMING:
         break;
