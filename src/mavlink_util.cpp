@@ -232,6 +232,9 @@ void handle_mavlink_message(mavlink_message_t* msg) {
         rep.cal_status, rep.fitness, rep.ofs_x, rep.ofs_y, rep.ofs_z);
       if (rep.cal_status == 4) {
         Serial.println("[CAL] REPORT SUCCESS");
+        cal_dia_x = rep.diag_x;
+        cal_dia_y = rep.diag_y;
+        cal_dia_z = rep.diag_z;
         cal_success = true;
         char buf[72];
         snprintf(buf, sizeof(buf), "DIA X=%.3f Y=%.3f Z=%.3f",

@@ -54,6 +54,8 @@
 // Черги
 #define STATUS_QUEUE_SIZE 16
 #define REASON_QUEUE_SIZE 12
+#define DIA_TOLERANCE 0.10f
+#define CAL_MAX_RETRIES 5
 
 // ========== СТАНИ ==========
 enum SystemState : uint8_t {
@@ -133,6 +135,8 @@ extern bool cal_success;
 extern bool cal_finalized;
 extern uint8_t cal_completion_pct;
 extern uint8_t last_cal_pct;
+extern float cal_dia_x, cal_dia_y, cal_dia_z;
+extern uint8_t cal_retries;
 extern bool no_arm_init;
 extern bool arm_cmd_sent;
 extern bool mode_cmd_sent;

@@ -191,8 +191,23 @@ void updateSystemState() {
         send_statustext(buf);
       }
       if (cal_success) {
-        state = STATE_CALIBRATION_END;
-        break;
+        bool dia_good = (fabs(1.0f - cal_dia_x) <= DIA_TOLERANCE) &&
+                   (fabs(1.0f - cal_dia_y) <= DIA_TOLERANCE) &&
+                   (fabs(1.0f - cal_dia_z) <= DIA_TOLERANCE);
+        if (dia_good || cal_retries >= CAL_MAX_RETRIES) {
+          if (cal_retries >= CAL_MAX_RETRIES) {
+            queue_statustext("Max retries, force accept");
+          }
+          state = STATE_CALIBRATION_END;
+        } else {
+          cal_retries++;
+          cal_success = false;
+          cal_cmd_sent = false;
+          char buf[72];
+          snprintf(buf, sizeof(buf), "Cal DIA retry %u", cal_retries);
+          queue_statustext(buf);
+          send_statustext_udp(buf);
+        }
       }
       break;
     }

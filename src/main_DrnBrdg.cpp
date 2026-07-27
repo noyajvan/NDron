@@ -63,6 +63,8 @@ bool cal_cmd_sent      = false;
 bool cal_success       = false;
 bool cal_finalized     = false;
 uint8_t cal_completion_pct = 0;
+float cal_dia_x = 0, cal_dia_y = 0, cal_dia_z = 0;
+uint8_t cal_retries = 0;
 bool no_arm_init       = false;
 bool arm_cmd_sent      = false;
 bool mode_cmd_sent     = false;
