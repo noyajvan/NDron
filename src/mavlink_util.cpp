@@ -26,7 +26,7 @@ void fcWrite(const uint8_t* d, size_t len) {
 }
 
 void forwardToWiFi(const uint8_t* data, size_t len) {
-  if (!wifiOn || !staWasConnected) return;
+  if (!wifiOn || WiFi.status() != WL_CONNECTED) return;
   udp.beginPacket(gcsIP, gcsPort);
   udp.write(data, len);
   udp.endPacket();
@@ -45,7 +45,7 @@ void send_statustext(const char* text) {
 }
 
 void send_statustext_udp(const char* text) {
-  if (!wifiOn || !staWasConnected) return;
+  if (!wifiOn || WiFi.status() != WL_CONNECTED) return;
   mavlink_msg_statustext_pack(cfg.sys_id, COMP_ID, &txMsg,
       MAV_SEVERITY_INFO, text, 0, 0);
   uint16_t len = mavlink_msg_to_send_buffer(txBuf, &txMsg);
@@ -121,11 +121,6 @@ void sendPreflightStorage() {
                     0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
 }
 
-void sendMavlinkReboot() {
-  send_command_long(MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN, 1.0f, 0.0f,
-                    0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
-}
-
 void handle_mavlink_message(mavlink_message_t* msg) {
   switch (msg->msgid) {
 
@@ -142,18 +137,6 @@ void handle_mavlink_message(mavlink_message_t* msg) {
       if (first_hb) {
         first_hb = false;
         queue_statustext("Mavlink OK");
-        send_command_long(MAV_CMD_SET_MESSAGE_INTERVAL,
-                          MAVLINK_MSG_ID_ATTITUDE, 100000, 0, 0, 0, 0, 0);
-        send_command_long(MAV_CMD_SET_MESSAGE_INTERVAL,
-                          MAVLINK_MSG_ID_RAW_IMU, 100000, 0, 0, 0, 0, 0);
-        send_command_long(MAV_CMD_SET_MESSAGE_INTERVAL,
-                          MAVLINK_MSG_ID_EKF_STATUS_REPORT, 200000, 0, 0, 0, 0, 0);
-        send_command_long(MAV_CMD_SET_MESSAGE_INTERVAL,
-                          MAVLINK_MSG_ID_VFR_HUD, 200000, 0, 0, 0, 0, 0);
-        send_command_long(MAV_CMD_SET_MESSAGE_INTERVAL,
-                          MAVLINK_MSG_ID_GPS_RAW_INT, 200000, 0, 0, 0, 0, 0);
-        send_command_long(MAV_CMD_SET_MESSAGE_INTERVAL,
-                          MAVLINK_MSG_ID_SYS_STATUS, 200000, 0, 0, 0, 0, 0);
       }
       break;
     }
@@ -291,12 +274,17 @@ void bridgeFCtoWiFi() {
 }
 
 void bridgeWiFiToFC() {
-  if (!wifiOn || !staWasConnected) return;
+  if (!wifiOn || WiFi.status() != WL_CONNECTED) return;
   int sz = udp.parsePacket();
   if (sz > 0) {
     last_server_pkt_ms = millis();
     if (!hasServer) {
       hasServer = true;
+      static unsigned long last_do_connect_msg = 0;
+      if (millis() - last_do_connect_msg > 60000) {
+        queue_statustext("DO connected");
+        last_do_connect_msg = millis();
+      }
     }
     int n = udp.read(bridgeBuf, sizeof(bridgeBuf));
     if (n <= 0) return;

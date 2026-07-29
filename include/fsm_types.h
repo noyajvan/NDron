@@ -34,7 +34,8 @@
 #define LED_CHERRY_D    0xFF0040
 
 // EKF
-#define EKF_ATTITUDE    0x01
+#define EKF_ATTITUDE      0x01
+#define EKF_POS_HORIZ_ABS 0x10
 #define COMP_ID         MAV_COMP_ID_ONBOARD_COMPUTER
 #define MODE_STABILIZE  0
 #define MODE_ACRO       1

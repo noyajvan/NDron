@@ -101,14 +101,26 @@ void updateSystemState() {
     case STATE_INIT_WIFI: {
       if (state_entry_ms == 0) state_entry_ms = now;
       if (now - state_entry_ms > 2000) {
+        Serial.println("[S] INIT_WIFI -> INIT_MAVLINK");
         state = STATE_INIT_MAVLINK;
+      } else {
+        static unsigned long last_log_wifi = 0;
+        if (now - last_log_wifi > 1000) { last_log_wifi = now; Serial.println("[S] waiting INIT_WIFI 2s"); }
       }
       break;
     }
 
     case STATE_INIT_MAVLINK: {
-      if (!heartbeat_received) break;
-      if (!ekf_report_received) break;
+      if (!heartbeat_received) {
+        static unsigned long last_log_hb = 0;
+        if (now - last_log_hb > 2000) { last_log_hb = now; Serial.println("[S] waiting heartbeat..."); }
+        break;
+      }
+      if (!ekf_report_received) {
+        static unsigned long last_log_ekf = 0;
+        if (now - last_log_ekf > 2000) { last_log_ekf = now; Serial.println("[S] waiting EKF report..."); }
+        break;
+      }
 
       bool ekf_ok = ((ekf_flags & EKF_ATTITUDE) != 0);
 
@@ -129,10 +141,26 @@ void updateSystemState() {
         send_statustext_udp("Bridge: EKF OK");
       }
 
-      if (!ekf_ok) break;
+      if (!ekf_ok) {
+        // Таймаут: якщо EKF_ATTITUDE не піднявся за 30 секунд — продовжуємо
+        static unsigned long ekf_timeout_log = 0;
+        if (now - state_entry_ms > 30000) {
+          if (now - ekf_timeout_log > 5000) {
+            ekf_timeout_log = now;
+            Serial.printf("[S] EKF_ATT timeout %lu s, forcing MAG_OK\n", (now - state_entry_ms) / 1000);
+            send_statustext_udp("Bridge: EKF att timeout, skip mag check");
+          }
+          if (now - state_entry_ms > 35000) {
+            state = STATE_MAG_OK;
+            break;
+          }
+        }
+        break;
+      }
       if (now - ekf_att_stable_ms < 5000) break;
 
       state = STATE_MAG_OK;
+      Serial.println("[S] EKF_ATT OK -> MAG_OK");
       break;
     }
 
@@ -184,6 +212,7 @@ void updateSystemState() {
         sendStartMagCal();
         send_statustext_udp("Bridge: calibration started");
         cal_cmd_sent = true;
+        Serial.println("[CAL] command sent, waiting progress...");
       }
       if (cal_completion_pct > 0 && cal_completion_pct - last_cal_pct >= 10) {
         last_cal_pct = cal_completion_pct;
@@ -191,9 +220,11 @@ void updateSystemState() {
         snprintf(buf, sizeof(buf), "Cal: %d%%", cal_completion_pct);
         queue_statustext(buf);
         send_statustext(buf);
+        Serial.printf("[CAL] progress %d%%\n", cal_completion_pct);
       }
       if (cal_success) {
         state = STATE_CALIBRATION_END;
+        Serial.println("[CAL] SUCCESS -> CALIBRATION_END");
         if (cal_dia_x != 0.0f) {
           bool dia_ok = (fabs(1.0f - cal_dia_x) <= DIA_TOLERANCE) &&
                         (fabs(1.0f - cal_dia_y) <= DIA_TOLERANCE) &&
@@ -201,6 +232,23 @@ void updateSystemState() {
           if (!dia_ok) {
             queue_statustext("DIA outside 15%");
           }
+        }
+      }
+
+      // Повторні спроби калібрування
+      unsigned long cal_time = now - state_entry_ms;
+      if (!cal_success && cal_cmd_sent && cal_time > 30000) {
+        cal_retries++;
+        if (cal_retries < CAL_MAX_RETRIES) {
+          Serial.printf("[CAL] timeout, retry %d/%d\n", cal_retries, CAL_MAX_RETRIES);
+          cal_cmd_sent = false;
+          cal_success = false;
+          state_entry_ms = now;
+          send_statustext_udp("Bridge: calibration retry");
+        } else {
+          Serial.println("[CAL] max retries, skip calibration");
+          send_statustext_udp("Bridge: calibration failed, skipping");
+          state = STATE_NO_ARM;
         }
       }
       break;
@@ -249,7 +297,7 @@ void updateSystemState() {
         break;
       }
 
-      bool can_auto = mission_loaded && missionFirstParsed && gps_fix_type >= 3;
+      bool can_auto = mission_loaded && missionFirstParsed && gps_fix_type >= 3 && (ekf_flags & EKF_POS_HORIZ_ABS);
       if (can_auto) {
         static bool auto_sent = false;
         if (!auto_sent || (now - state_entry_ms >= 20000)) {
