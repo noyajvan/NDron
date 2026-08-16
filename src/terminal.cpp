@@ -22,6 +22,9 @@ void handleTerminalConfig() {
           Serial.printf("EKF: 0x%04X  mag: %.3f  mission: %d/%d\n",
               ekf_flags, mag_test_ratio, mission_loaded, mission_count);
           Serial.printf("FC: %u bytes  %u msgs\n", fc_bytes, fc_msgs);
+          Serial.printf("Temp: %.1f C  CPU: %u MHz  RSSI: %d dBm  TX: %d dBm\n",
+              temperatureRead(), getCpuFrequencyMhz(), (int)WiFi.RSSI(),
+              (int)WiFi.getTxPower());
           Serial.printf("WiFi cfg: %s / %s\n", cfg.sta_ssid,
               strlen(cfg.sta_pass) ? "pass set" : "no pass");
         }

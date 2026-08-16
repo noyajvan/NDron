@@ -12,7 +12,7 @@ void wifiActivate() {
   WiFi.mode(WIFI_STA);
   delay(50);
   WiFi.setTxPower(WIFI_POWER_2dBm);
-  WiFi.setSleep(true);
+  WiFi.setSleep(false);
   udp.begin(UDP_PORT);
   WiFi.begin(cfg.sta_ssid, cfg.sta_pass);
   wifiActivating = true;
@@ -41,7 +41,7 @@ void wifiFullRestart() {
   WiFi.mode(WIFI_STA);
   delay(50);
   WiFi.setTxPower(WIFI_POWER_2dBm);
-  WiFi.setSleep(true);
+  WiFi.setSleep(false);
   udp.begin(UDP_PORT);
   wifiActivating = true;
   wifiTryStart = millis();

@@ -1,6 +1,73 @@
 #include <driver/uart.h>
+#include <math.h>
 #include "fsm_types.h"
 #include "mavlink_util.h"
+
+// ===== Детекція крашу =====
+// Гейт: дрон летів (armed && висота > 2 м над базою). Таймери скидаються,
+// якщо дрон знову рухається — "упав але полетів" не вважається крашем.
+static bool   crash_was_flying     = false;
+static float  crash_last_stable_alt = 0.0f;
+static unsigned long crash_stuck_timer  = 0;
+static unsigned long crash_gyro_timer   = 0;
+static unsigned long crash_descend_timer = 0;
+static float  crash_gyro_x = 0.0f, crash_gyro_y = 0.0f;
+static float  crash_ground_speed = 0.0f;
+static uint16_t crash_throttle = 0;
+static float  crash_climb = 0.0f;
+
+void checkCrashDetection() {
+  if (crash_triggered) return;
+  unsigned long now = millis();
+
+  // Гейт "летів": тільки в MISSION, armed і піднявся вище 2 м над базою.
+  if (state != STATE_MISSION || !is_armed) {
+    crash_was_flying = false;
+    crash_stuck_timer = 0;
+    crash_gyro_timer = 0;
+    crash_descend_timer = 0;
+    crash_last_stable_alt = vfr_alt;
+    return;
+  }
+  if (mission_base_alt >= 0.0f && vfr_alt - mission_base_alt > 2.0f) {
+    crash_was_flying = true;
+  }
+  if (!crash_was_flying) return;
+
+  // 1. NET — застряг у перешкоді: висота стабільна, швидкість ~0, газ великий
+  if (fabsf(vfr_alt - crash_last_stable_alt) < 0.15f && crash_ground_speed < 0.15f) {
+    if (crash_stuck_timer == 0) crash_stuck_timer = now;
+    if (now - crash_stuck_timer > 3000 && crash_throttle > 45) {
+      crash_triggered = true;
+      Serial.println("[CRASH] Net");
+    }
+  } else {
+    crash_stuck_timer = 0;
+    crash_last_stable_alt = vfr_alt;
+  }
+
+  // 2. TUMBLE — різке обертання (кувирок)
+  if (fabsf(crash_gyro_x) > 4500.0f || fabsf(crash_gyro_y) > 4500.0f) {
+    if (crash_gyro_timer == 0) crash_gyro_timer = now;
+    if (now - crash_gyro_timer > 150) {
+      crash_triggered = true;
+      Serial.println("[CRASH] Tumble");
+    }
+  } else {
+    crash_gyro_timer = 0;
+  }
+
+  // 3. RAPID DESCENT — різке падіння (>5 м/с вниз)
+  if (crash_climb < -5.0f) {
+    if (crash_descend_timer == 0) crash_descend_timer = now;
+    if (now - crash_descend_timer > 500) {
+      crash_triggered = true;
+      Serial.println("[CRASH] RapidDescent");
+    }
+  } else {
+    crash_descend_timer = 0;
+  }
+}
 
 void fcBegin(int baud, int rx, int tx) {
   uart_config_t uart_config = {
@@ -185,6 +252,19 @@ void handle_mavlink_message(mavlink_message_t* msg) {
       mavlink_msg_vfr_hud_decode(msg, &vfr);
       vfr_alt = vfr.alt;
       vfr_climb = vfr.climb;
+      crash_ground_speed = vfr.groundspeed;
+      crash_throttle = vfr.throttle;
+      crash_climb = vfr.climb;
+      checkCrashDetection();
+      break;
+    }
+
+    case MAVLINK_MSG_ID_RAW_IMU: {
+      mavlink_raw_imu_t imu;
+      mavlink_msg_raw_imu_decode(msg, &imu);
+      crash_gyro_x = imu.xgyro;
+      crash_gyro_y = imu.ygyro;
+      checkCrashDetection();
       break;
     }
 
@@ -256,17 +336,24 @@ void handle_mavlink_message(mavlink_message_t* msg) {
 }
 
 void bridgeFCtoWiFi() {
-  for (int pass = 0; pass < 4; pass++) {
+  for (int pass = 0; pass < 16; pass++) {
     size_t avail = fcAvailable();
     if (avail == 0) break;
     size_t n = min(avail, (size_t)BRIDGE_BUF_SIZE);
     n = uart_read_bytes((uart_port_t)FC_UART_NUM, bridgeBuf, n, 0);
     if (n == 0) break;
     fc_bytes += n;
-    forwardToWiFi(bridgeBuf, n);
     for (size_t i = 0; i < n; i++) {
       if (mavlink_parse_char(MAVLINK_COMM_0, bridgeBuf[i], &mavMsg, &mavStatus)) {
         fc_msgs++;
+        // Не ретранслюємо спам калібрування компаса — він забиває 4G
+        // і гальмує завантаження параметрів в Mission Planner.
+        bool spam = (mavMsg.msgid == MAVLINK_MSG_ID_MAG_CAL_REPORT ||
+                     mavMsg.msgid == MAVLINK_MSG_ID_MAG_CAL_PROGRESS);
+        if (!spam) {
+          uint16_t len = mavlink_msg_to_send_buffer(txBuf, &mavMsg);
+          forwardToWiFi(txBuf, len);
+        }
         handle_mavlink_message(&mavMsg);
       }
     }
@@ -275,8 +362,9 @@ void bridgeFCtoWiFi() {
 
 void bridgeWiFiToFC() {
   if (!wifiOn || WiFi.status() != WL_CONNECTED) return;
-  int sz = udp.parsePacket();
-  if (sz > 0) {
+  for (int pass = 0; pass < 16; pass++) {
+    int sz = udp.parsePacket();
+    if (sz <= 0) break;
     last_server_pkt_ms = millis();
     if (!hasServer) {
       hasServer = true;
@@ -287,7 +375,7 @@ void bridgeWiFiToFC() {
       }
     }
     int n = udp.read(bridgeBuf, sizeof(bridgeBuf));
-    if (n <= 0) return;
+    if (n <= 0) break;
     fcWrite(bridgeBuf, n);
   }
 }

@@ -102,7 +102,7 @@ void setup() {
   Serial.begin(115200);
   delay(100);
 
-  setCpuFrequencyMhz(80);
+  setCpuFrequencyMhz(160);
   btStop();
   loadConfig();
   fcBegin(cfg.baud, 44, 43);
@@ -140,10 +140,6 @@ void queue_statustext(const char* text) {
 
 void loop() {
   unsigned long now = millis();
-
-  static unsigned long last_loop_ms = 0;
-  if (now - last_loop_ms < 1) return;
-  last_loop_ms = now;
 
   handleTerminalConfig();
 

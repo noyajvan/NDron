@@ -7,6 +7,7 @@
 extern bool crash_triggered;
 uint8_t last_cal_pct = 0;
 bool flew_above_1m = false;
+float mission_base_alt = 0.0f;
 
 void updateSystemState() {
   unsigned long now = millis();
@@ -87,6 +88,8 @@ void updateSystemState() {
         mission_start_msg = false;
         was_in_auto = false;
         flew_above_1m = false;
+        // База висоти ще не зафіксована: чекаємо перший валідний VFR_HUD.
+        mission_base_alt = -1.0f;
         break;
       case STATE_RELAY_CONTROL:
         break;
@@ -319,7 +322,12 @@ void updateSystemState() {
         queue_statustext("START");
         mission_start_msg = true;
       }
-      if (vfr_alt > 1.0f) {
+      // Фіксуємо базову висоту при першому валідному VFR_HUD,
+      // щоб не вважати AMSL-висоту поля (напр. 57 м) за взліт.
+      if (mission_base_alt < 0.0f && vfr_alt > 0.5f) {
+        mission_base_alt = vfr_alt;
+      }
+      if (mission_base_alt >= 0.0f && vfr_alt - mission_base_alt > 1.0f) {
         flew_above_1m = true;
       }
       if (current_custom_mode == MODE_AUTO) was_in_auto = true;
