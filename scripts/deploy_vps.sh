@@ -23,95 +23,148 @@ sudo chown -R $USER:$USER /opt/drone-relay
 # 4. Копіювання скрипта реле (якщо запускається локально на сервері, файл вже має бути перенесений)
 # Створимо файл реле безпосередньо, якщо його ще немає
 cat << 'EOF' > /opt/drone-relay/udp_relay_vps.py
+#!/usr/bin/env python3
+"""
+VPS UDP/TCP Relay for DroneBridge:
+  Drone (UDP 14550) <-> GCS UDP (14551)
+  Drone (UDP 14550) <-> GCS TCP (14552)  <- Mission Planner TCP (persistent bidirectional)
+"""
 import socket, sys, time, select, threading
 
-DRONE_PORT = 14550
-GCS_PORT = 14551
-CMD_PORT = 14552
-DT = 60       # Drone timeout: 60s
-GT = 300      # GCS timeout: 300s
-LOG_PERIOD = 60  # Health log every 60s
+DRONE_PORT   = 14550
+UDP_GCS_PORT = 14551
+TCP_GCS_PORT = 14552
+DT  = 60    # Drone timeout, s
+GT  = 300   # GCS timeout, s
+LOG_PERIOD = 60
 
 ds = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 ds.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 ds.bind(('0.0.0.0', DRONE_PORT))
+ds.setblocking(0)
 
 gs = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 gs.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-gs.bind(('0.0.0.0', GCS_PORT))
+gs.bind(('0.0.0.0', UDP_GCS_PORT))
+gs.setblocking(0)
 
 drone = None
-gcs = None
-ld = 0.0
-lg = 0.0
-last_log = 0.0
+drone_t = 0
+udp_gcs = {}          # addr -> last_seen
+tcp_clients = {}      # socket -> addr
+tcp_lock = threading.Lock()
 
-def clean():
-    global drone, gcs
-    changed = False
-    now = time.time()
-    if drone and now - ld > DT:
-        sys.stderr.write(f"Drone timeout {drone[0]}\n"); sys.stderr.flush()
-        drone = None
-        changed = True
-    if gcs and now - lg > GT:
-        sys.stderr.write(f"GCS timeout {gcs[0]}\n"); sys.stderr.flush()
-        gcs = None
-        changed = True
-    return changed
+def broadcast_tcp(data):
+    with tcp_lock:
+        for s in list(tcp_clients.keys()):
+            try:
+                s.sendall(data)
+            except Exception:
+                try:
+                    s.close()
+                except Exception:
+                    pass
+                tcp_clients.pop(s, None)
 
-def tcp_cmd_server():
+def tcp_client_loop(conn, addr):
+    global drone
+    try:
+        while True:
+            try:
+                data = conn.recv(4096)
+                if not data:
+                    break
+                if drone:
+                    ds.sendto(data, drone)
+            except socket.timeout:
+                continue
+            except Exception:
+                break
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        with tcp_lock:
+            tcp_clients.pop(conn, None)
+        sys.stderr.write(f"TCP GCS disconnected: {addr[0]}\n"); sys.stderr.flush()
+
+def tcp_server():
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(('0.0.0.0', CMD_PORT))
-    srv.listen(5)
-    srv.settimeout(1.0)
-    sys.stderr.write(f"CMD TCP:{CMD_PORT}\n"); sys.stderr.flush()
+    srv.bind(('0.0.0.0', TCP_GCS_PORT))
+    srv.listen(8)
+    srv.settimeout(0.5)
+    sys.stderr.write(f"TCP GCS server: {TCP_GCS_PORT}\n"); sys.stderr.flush()
     while True:
         try:
             conn, addr = srv.accept()
-            conn.settimeout(5.0)
-            sys.stderr.write(f"CMD conn {addr[0]}\n"); sys.stderr.flush()
-            try:
-                data = conn.recv(4096)
-                if data and drone:
-                    ds.sendto(data.strip(), drone)
-                    sys.stderr.write(f"CMD fwd {len(data)}B\n"); sys.stderr.flush()
-            except: pass
-            conn.close()
-        except: pass
+            conn.settimeout(0.1)
+            with tcp_lock:
+                tcp_clients[conn] = addr
+            sys.stderr.write(f"TCP GCS connected: {addr[0]}\n"); sys.stderr.flush()
+            threading.Thread(target=tcp_client_loop, args=(conn, addr), daemon=True).start()
+        except socket.timeout:
+            continue
+        except Exception:
+            pass
 
-threading.Thread(target=tcp_cmd_server, daemon=True).start()
+threading.Thread(target=tcp_server, daemon=True).start()
 
-sys.stderr.write(f"Relay {DRONE_PORT}<->{GCS_PORT}\n"); sys.stderr.flush()
+sys.stderr.write(f"Relay {DRONE_PORT} <-> UDP {UDP_GCS_PORT} / TCP {TCP_GCS_PORT}\n"); sys.stderr.flush()
 
+last_log = 0.0
 while True:
+    now = time.time()
     try:
-        r, _, _ = select.select([ds, gs], [], [], 1.0)
-        now = time.time()
-        
-        if ds in r:
-            data, addr = ds.recvfrom(4096)
-            if drone != addr:
+        readable, _, _ = select.select([ds, gs], [], [], 0.05)
+
+        if ds in readable:
+            try:
+                data, addr = ds.recvfrom(4096)
+                was_new = drone is None
                 drone = addr
-                sys.stderr.write(f"Drone active: {addr[0]}:{addr[1]}\n"); sys.stderr.flush()
-            ld = now
-            if gcs:
-                gs.sendto(data, gcs)
-                
-        if gs in r:
-            data, addr = gs.recvfrom(4096)
-            if gcs != addr:
-                gcs = addr
-                sys.stderr.write(f"GCS active: {addr[0]}:{addr[1]}\n"); sys.stderr.flush()
-            lg = now
+                drone_t = now
+                if was_new:
+                    sys.stderr.write(f"Drone: {addr[0]}\n"); sys.stderr.flush()
+                for ga in list(udp_gcs.keys()):
+                    if now - udp_gcs[ga] <= GT:
+                        try:
+                            gs.sendto(data, ga)
+                        except Exception:
+                            pass
+                broadcast_tcp(data)
+            except Exception:
+                pass
+
+        if gs in readable:
+            try:
+                data, addr = gs.recvfrom(4096)
+                if addr not in udp_gcs:
+                    sys.stderr.write(f"UDP GCS: {addr[0]}:{addr[1]}\n"); sys.stderr.flush()
+                udp_gcs[addr] = now
+                if drone and (now - drone_t <= DT):
+                    ds.sendto(data, drone)
+            except Exception:
+                pass
+
+        if drone and (now - drone_t > DT):
+            sys.stderr.write("Drone gone\n"); sys.stderr.flush()
+            drone = None
+        for a in [a for a in udp_gcs if now - udp_gcs[a] > GT]:
+            del udp_gcs[a]
+
+        if now - last_log >= LOG_PERIOD:
+            n_udp = len([a for a in udp_gcs if now - udp_gcs[a] <= GT])
+            with tcp_lock:
+                n_tcp = len(tcp_clients)
             if drone:
-                ds.sendto(data, drone)
-                
-        if clean() or now - last_log > LOG_PERIOD:
+                sys.stderr.write(f"alive: drone={drone[0]} udp_gcs={n_udp} tcp_gcs={n_tcp}\n")
+            else:
+                sys.stderr.write(f"waiting: drone=None udp_gcs={n_udp} tcp_gcs={n_tcp}\n")
+            sys.stderr.flush()
             last_log = now
-            sys.stderr.write(f"Status: Drone={drone}, GCS={gcs}\n"); sys.stderr.flush()
-            
+
     except KeyboardInterrupt:
         break
     except Exception as e:

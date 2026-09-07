@@ -1,14 +1,14 @@
 <#
 .DESCRIPTION
-    ESP32 sends telemetry to VPS (134.209.206.127:14550).
-    VPS forwards to all connected GCS. All drones use same port.
+    ESP32 sends telemetry to Oracle VPS (152.70.51.224:14550).
+    Relay forwards to all connected GCS.
 .PARAMETER Drone
     Drone label for display (1, 2, 3). Default: 1
 #>
 param([string]$Drone = "1")
 $ErrorActionPreference = "Continue"
 
-$VpsIP   = "134.209.206.127"
+$VpsIP   = "152.70.51.224"
 $VpsPort = 14551
 
 $Labels = @{ "1" = "Drone 1"; "2" = "Drone 2"; "3" = "Drone 3" }
@@ -26,7 +26,7 @@ if (-not (Test-Path $MpPath)) {
 Write-Host ""
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host "  DroneBridge -> $($d.Name) ($($d.IP):$($d.Port))" -ForegroundColor Cyan
-Write-Host "  VPS relay: DO Amsterdam" -ForegroundColor DarkGray
+Write-Host "  VPS relay: Oracle Cloud" -ForegroundColor DarkGray
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host ""
 
@@ -138,6 +138,7 @@ if ($connected) {
     Write-Host "  Green bar should appear in 3-5 seconds" -ForegroundColor Green
 } else {
     Write-Host "  MP launched. If not connected:" -ForegroundColor Yellow
-    Write-Host "  In MP: UDPCI -> $($d.IP):$($d.Port) -> Connect" -ForegroundColor Yellow
+    Write-Host "  In MP: TCP -> 152.70.51.224 -> 14552 -> Connect (наиболее надёжно)" -ForegroundColor Yellow
+    Write-Host "  In MP: UDPCI -> 152.70.51.224 -> 14551 -> Connect" -ForegroundColor Yellow
 }
 Write-Host "============================================" -ForegroundColor Cyan

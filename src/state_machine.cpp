@@ -8,14 +8,18 @@ extern bool crash_triggered;
 uint8_t last_cal_pct = 0;
 bool flew_above_1m = false;
 float mission_base_alt = 0.0f;
+static unsigned long land_stop_ms = 0;
+static unsigned long tip_bounce_ms = 0;
 
 void updateSystemState() {
   unsigned long now = millis();
 
   hasWifi = wifiOn && (WiFi.status() == WL_CONNECTED);
 
-  if (!staWasConnected && wifiOn && (now - start_time > WIFI_TIMEOUT_MS)) {
-    wifiDeactivate();
+  static unsigned long wifi_timeout_chk_ms = 0;
+  if (!staWasConnected && wifiOn && (now - wifi_timeout_chk_ms > WIFI_TIMEOUT_MS)) {
+    wifi_timeout_chk_ms = now;
+    wifiFullRestart();
   }
 
   if (current_custom_mode != MODE_STABILIZE && current_custom_mode != MODE_AUTO) {
@@ -29,11 +33,12 @@ void updateSystemState() {
 
   if (heartbeat_received && !missionFirstParsed) {
     if (lastMissionReq == 0 && now - start_time > 2000) {
-      mission_count = 0;
-      mission_loaded = false;
-      send_mission_request_list();
-      lastMissionReq = now;
-    } else if (lastMissionReq && now - lastMissionReq > 5000) {
+        mission_count = 0;
+        mission_loaded = false;
+        mission_has_land = false;
+        send_mission_request_list();
+        lastMissionReq = now;
+      } else if (lastMissionReq && now - lastMissionReq > 5000) {
       missionFirstParsed = true;
       lastMissionReq = 0;
       if (mission_count > 0) mission_loaded = true;
@@ -86,8 +91,9 @@ void updateSystemState() {
         break;
       case STATE_MISSION:
         mission_start_msg = false;
-        was_in_auto = false;
         flew_above_1m = false;
+        land_stop_ms = 0;
+        tip_bounce_ms = 0;
         // База висоти ще не зафіксована: чекаємо перший валідний VFR_HUD.
         mission_base_alt = -1.0f;
         break;
@@ -270,13 +276,14 @@ void updateSystemState() {
     }
 
     case STATE_NO_ARM: {
-      if (mag_test_ratio > 0.5f) {
-        send_statustext_udp("Bridge: mag>0.5 re-calibrating");
-        state = STATE_MAG_ERROR;
-        break;
-      }
+      // Калібрування компаса запускається ТІЛЬКИ по перевороту в синьому
+      // вікні STATE_MAG_OK (20 с після MAG_OK). Раніше тут був тригер
+      // mag_test_ratio>0.5 — він запускав калібрування в будь-який момент
+      // (напр. при перевороті у жовтому стані) і зациклював її.
 
       if (!no_arm_init) {
+        mission_loaded = false;
+        mission_has_land = false;
         send_mission_request_list();
         no_arm_init = true;
       }
@@ -300,7 +307,9 @@ void updateSystemState() {
         break;
       }
 
-      bool can_auto = mission_loaded && missionFirstParsed && gps_fix_type >= 3 && (ekf_flags & EKF_POS_HORIZ_ABS);
+      // AUTO шлем при ARMED + GPS fix + EKF-позиция. Флаги mission_loaded/
+      // missionFirstParsed убраны: миссию знает FC, мосту они не нужны.
+      bool can_auto = gps_fix_type >= 3 && (ekf_flags & EKF_POS_HORIZ_ABS);
       if (can_auto) {
         static bool auto_sent = false;
         if (!auto_sent || (now - state_entry_ms >= 20000)) {
@@ -330,11 +339,37 @@ void updateSystemState() {
       if (mission_base_alt >= 0.0f && vfr_alt - mission_base_alt > 1.0f) {
         flew_above_1m = true;
       }
-      if (current_custom_mode == MODE_AUTO) was_in_auto = true;
 
-      bool mission_ended = !is_armed || (was_in_auto && current_custom_mode != MODE_AUTO);
+      // LAND: команда NAV_LAND у місії або режим LAND.
+      bool in_land = mission_has_land || (current_custom_mode == MODE_LAND);
 
-      if (mission_ended || crash_triggered) {
+      // "Сів і стоїть": ArduPilot підтверджує ON_GROUND (не ширяє в повітрі).
+      // Тримаємо 5 с, щоб підтвердити, що дрон не підлетів угору.
+      if (in_land && landed_state == MAV_LANDED_STATE_ON_GROUND) {
+        if (land_stop_ms == 0) land_stop_ms = now;
+      } else {
+        land_stop_ms = 0;
+      }
+      bool landed_stopped = flew_above_1m && in_land &&
+                            land_stop_ms != 0 && (now - land_stop_ms > 5000);
+
+      // "Відскок" на нерівній поверхні (може бути сітка, дах, дерево):
+      // нахил >30° і контактер намагається вирівнятись і знову злетіти
+      // (climb > 0.5). Не плутати з ширянням при зносі вітром:
+      // там climb ≈ 0 і нахил не сягає 30°, тому умова не спрацює.
+      bool tipped = (fabsf(roll_deg) > 30.0f) || (fabsf(pitch_deg) > 30.0f);
+      bool bounce_attempt = tipped && (vfr_climb > 0.5f);
+      if (bounce_attempt) {
+        if (tip_bounce_ms == 0) tip_bounce_ms = now;
+      } else {
+        tip_bounce_ms = 0;
+      }
+      bool tipped_bounce = flew_above_1m && in_land &&
+                           tip_bounce_ms != 0 && (now - tip_bounce_ms > 400);
+
+      bool mission_ended = !is_armed;
+
+      if (mission_ended || landed_stopped || tipped_bounce || crash_triggered) {
         if (flew_above_1m) {
           sendMavlinkSetRelay();
           sendMavlinkForceDisarm();

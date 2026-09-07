@@ -1,15 +1,15 @@
 ﻿<#
 .SYNOPSIS
-    Quick launch Mission Planner via VPS relay (no firewall, no Tailscale)
+    Quick launch Mission Planner via Oracle VPS relay (TCP, most reliable)
 .DESCRIPTION
-    ESP32 → phone hotspot → 4G → VPS (134.209.206.127:14550) → MP
+    ESP32 → phone hotspot → 4G → Oracle VPS (152.70.51.224:14550) → MP TCP 14552
     Phone is just a hotspot. No Tailscale needed.
 #>
 
 $ErrorActionPreference = "Continue"
 
-$VpsIP   = "134.209.206.127"
-$VpsPort = 14550
+$VpsIP   = "152.70.51.224"
+$VpsPort = 14552
 
 Write-Host "=== DroneBridge VPS Relay ===" -ForegroundColor Cyan
 
@@ -32,16 +32,21 @@ if ($old) {
     Write-Host "[MP]    No existing instance" -ForegroundColor Green
 }
 
-# --- 3. Update MP config ---
-$cfgPath = "$env:USERPROFILE\OneDrive\Документы\Mission Planner\config.xml"
-if (Test-Path $cfgPath) {
+# --- 3. Update MP config (search all common locations) ---
+$cfgCandidates = @(
+    "$env:USERPROFILE\Documents\Mission Planner\config.xml",
+    "$env:USERPROFILE\OneDrive\Документы\Mission Planner\config.xml",
+    "$env:USERPROFILE\OneDrive\Documents\Mission Planner\config.xml"
+)
+$cfgPath = $cfgCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+if ($cfgPath) {
     try {
         [xml]$cfg = Get-Content $cfgPath
-        $cfg.Config.comport = "UDPCl"
+        $cfg.Config.comport = "Tcp"
         $cfg.Config.UDP_host = $VpsIP
         $cfg.Config.UDP_port = [string]$VpsPort
         $cfg.Save($cfgPath)
-        Write-Host "[CONFIG] MP set to UDPCl $VpsIP`:$VpsPort" -ForegroundColor Green
+        Write-Host "[CONFIG] MP set to TCP $VpsIP`:$VpsPort" -ForegroundColor Green
     } catch {
         Write-Host "[CONFIG] Write failed — connect manually" -ForegroundColor Yellow
     }
@@ -63,6 +68,6 @@ if (Test-Path $mpPath) {
 
 Write-Host ""
 Write-Host "=== MANUAL CONNECT ===" -ForegroundColor Cyan
-Write-Host "  UDPCI -> $VpsIP`:$VpsPort -> Connect" -ForegroundColor Yellow
+Write-Host "  TCP -> $VpsIP`:$VpsPort -> Connect" -ForegroundColor Yellow
 Write-Host ""
 Write-Host "Phone = hotspot only. No Tailscale, no firewall." -ForegroundColor DarkGray

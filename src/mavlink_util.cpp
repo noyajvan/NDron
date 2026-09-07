@@ -20,7 +20,7 @@ void checkCrashDetection() {
   if (crash_triggered) return;
   unsigned long now = millis();
 
-  // Гейт "летів": тільки в MISSION, armed і піднявся вище 2 м над базою.
+  // Гейт "летів": тільки в MISSION, armed і піднявся вище 1 м над базою.
   if (state != STATE_MISSION || !is_armed) {
     crash_was_flying = false;
     crash_stuck_timer = 0;
@@ -29,7 +29,7 @@ void checkCrashDetection() {
     crash_last_stable_alt = vfr_alt;
     return;
   }
-  if (mission_base_alt >= 0.0f && vfr_alt - mission_base_alt > 2.0f) {
+  if (mission_base_alt >= 0.0f && vfr_alt - mission_base_alt > 1.0f) {
     crash_was_flying = true;
   }
   if (!crash_was_flying) return;
@@ -92,11 +92,16 @@ void fcWrite(const uint8_t* d, size_t len) {
   uart_write_bytes((uart_port_t)FC_UART_NUM, d, len);
 }
 
+static unsigned long last_fwd_fail_ms = 0;
 void forwardToWiFi(const uint8_t* data, size_t len) {
   if (!wifiOn || WiFi.status() != WL_CONNECTED) return;
+  // Backoff після невдалої відправки: на слабкому 4G стек lwIP переповнюється
+  // (ENOMEM) — даємо йому час спорожнитися, замість спамити Serial кожен пакет.
+  unsigned long now = millis();
+  if (last_fwd_fail_ms && now - last_fwd_fail_ms < 250) return;
   udp.beginPacket(gcsIP, gcsPort);
   udp.write(data, len);
-  udp.endPacket();
+  if (udp.endPacket() == 0) last_fwd_fail_ms = now;
 }
 
 void sendToBoth(const uint8_t* data, uint16_t len) {
@@ -133,7 +138,9 @@ void send_heartbeat() {
   mavlink_msg_heartbeat_pack(cfg.sys_id, COMP_ID, &txMsg,
       MAV_TYPE_ONBOARD_CONTROLLER, MAV_AUTOPILOT_INVALID, 0, 0, 0);
   uint16_t len = mavlink_msg_to_send_buffer(txBuf, &txMsg);
-  sendToBoth(txBuf, len);
+  fcWrite(txBuf, len);
+  forwardToWiFi(txBuf, len);
+  forwardToWiFi(txBuf, len);
 }
 
 void send_mission_request_list() {
@@ -259,6 +266,13 @@ void handle_mavlink_message(mavlink_message_t* msg) {
       break;
     }
 
+    case MAVLINK_MSG_ID_EXTENDED_SYS_STATE: {
+      mavlink_extended_sys_state_t es;
+      mavlink_msg_extended_sys_state_decode(msg, &es);
+      landed_state = es.landed_state;
+      break;
+    }
+
     case MAVLINK_MSG_ID_RAW_IMU: {
       mavlink_raw_imu_t imu;
       mavlink_msg_raw_imu_decode(msg, &imu);
@@ -280,7 +294,12 @@ void handle_mavlink_message(mavlink_message_t* msg) {
       mavlink_mag_cal_progress_t cal;
       mavlink_msg_mag_cal_progress_decode(msg, &cal);
       cal_completion_pct = cal.completion_pct;
-      Serial.printf("[CAL] status=%d pct=%d compass=%d\n", cal.cal_status, cal.completion_pct, cal.compass_id);
+      // Не друкуємо кожен пакет — тільки при зміні стану, щоб не забивати Serial.
+      static uint8_t last_cal_status = 255;
+      if (cal.cal_status != last_cal_status || (cal.cal_status == 4 && !cal_success)) {
+        last_cal_status = cal.cal_status;
+        Serial.printf("[CAL] status=%d pct=%d compass=%d\n", cal.cal_status, cal.completion_pct, cal.compass_id);
+      }
       if (cal.cal_status == 4) {
         Serial.println("[CAL] PROGRESS SUCCESS");
         cal_success = true;
@@ -318,6 +337,11 @@ void handle_mavlink_message(mavlink_message_t* msg) {
     }
 
     case MAVLINK_MSG_ID_MISSION_ITEM_INT: {
+      mavlink_mission_item_int_t mi;
+      mavlink_msg_mission_item_int_decode(msg, &mi);
+      if (mi.command == MAV_CMD_NAV_LAND) {
+        mission_has_land = true;
+      }
       break;
     }
 
@@ -350,8 +374,13 @@ void bridgeFCtoWiFi() {
         // і гальмує завантаження параметрів в Mission Planner.
         bool spam = (mavMsg.msgid == MAVLINK_MSG_ID_MAG_CAL_REPORT ||
                      mavMsg.msgid == MAVLINK_MSG_ID_MAG_CAL_PROGRESS);
+        // Телеметрія йде завжди, не залежно від hasServer: раніше гейт
+        // глушив потік через 30 с тиші від GCS і MP «зависав».
         if (!spam) {
           uint16_t len = mavlink_msg_to_send_buffer(txBuf, &mavMsg);
+          // 4G губить ~90% UDP — шлемо 2 копії, щоб параметри/телеметрія доїжджали
+          // (одна копія = 90% втрат, дві = ~99% доставки).
+          forwardToWiFi(txBuf, len);
           forwardToWiFi(txBuf, len);
         }
         handle_mavlink_message(&mavMsg);

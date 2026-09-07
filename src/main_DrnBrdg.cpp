@@ -70,12 +70,12 @@ bool no_arm_init       = false;
 bool arm_cmd_sent      = false;
 bool mode_cmd_sent     = false;
 bool mission_start_msg = false;
-bool was_in_auto = false;
-
 uint16_t mission_count = 0;
 bool mission_loaded = false;
 bool missionFirstParsed = false;
 unsigned long lastMissionReq = 0;
+bool mission_has_land = false;
+uint8_t landed_state = 0;
 
 unsigned long start_time = 0;
 unsigned long last_wifi_hb = 0;
@@ -146,7 +146,7 @@ void loop() {
   if (wifiOn) bridgeWiFiToFC();
   bridgeFCtoWiFi();
 
-  if (now - last_wifi_hb >= 1000) {
+  if (now - last_wifi_hb >= 500) {
     send_heartbeat();
     send_queued_statustext();
     last_wifi_hb = now;
@@ -169,12 +169,16 @@ void loop() {
     send_statustext_udp("Mavlink OK");
   }
 
-  if (wifiActivating && now - wifiTryStart > 20000) {
-    wifiActivating = false;
-    if (strlen(cfg.sta_ssid) > 0) {
-      WiFi.begin(cfg.sta_ssid, cfg.sta_pass);
-      wifiActivating = true;
-      wifiTryStart = now;
+  static unsigned long wifi_last_retry_ms = 0;
+  if (wifiActivating && st != WL_CONNECTED) {
+    if (now - wifiTryStart > 60000) {
+      queue_statustext("WiFi full restart");
+      wifiFullRestart();
+      wifi_last_retry_ms = 0;
+    } else if (now - wifi_last_retry_ms > 30000) {
+      wifi_last_retry_ms = now;
+      queue_statustext("WiFi retry");
+      wifiRetryConnect();
     }
   }
 

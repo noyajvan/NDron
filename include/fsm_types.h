@@ -143,7 +143,6 @@ extern bool no_arm_init;
 extern bool arm_cmd_sent;
 extern bool mode_cmd_sent;
 extern bool mission_start_msg;
-extern bool was_in_auto;
 extern bool flew_above_1m;
 extern float mission_base_alt;
 
@@ -151,6 +150,8 @@ extern uint16_t mission_count;
 extern bool mission_loaded;
 extern bool missionFirstParsed;
 extern unsigned long lastMissionReq;
+extern bool mission_has_land;
+extern uint8_t landed_state;
 
 extern unsigned long start_time;
 extern unsigned long last_wifi_hb;
