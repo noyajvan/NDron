@@ -6,6 +6,7 @@
 #define RAD_TO_DEG 57.295779513082320876798154814105f
 #endif
 #include <WiFi.h>
+#include <WiFiClient.h>
 #include <WiFiUdp.h>
 #include <ardupilotmega/mavlink.h>
 #include <Adafruit_NeoPixel.h>
@@ -20,6 +21,7 @@
 #define FC_TX_BUF       4096
 #define BRIDGE_BUF_SIZE 2048
 #define UDP_PORT        14550
+#define TCP_PORT        14553
 
 // Кольори
 #define LED_OFF         0x000000
@@ -86,6 +88,7 @@ struct Config {
 extern Config cfg;
 extern Adafruit_NeoPixel pixels;
 extern WiFiUDP udp;
+extern WiFiClient tcpLink;
 extern IPAddress gcsIP;
 extern uint16_t gcsPort;
 

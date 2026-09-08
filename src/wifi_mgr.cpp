@@ -1,6 +1,47 @@
 #include "fsm_types.h"
 #include "wifi_mgr.h"
 
+// Надёжный транспорт дрон->VPS: вихідний TCP до реле (14553).
+// TCP сам гарантує доставку (ретрансмісія) — на відміну від UDP на 4G,
+// який губив ~90% пакетів і «вічна» загрузка параметрів у Mission Planner.
+WiFiClient tcpLink;
+static unsigned long lastTcpTry = 0;
+static bool tcpWasUp = false;
+
+bool tcpConnected() {
+  if (!wifiOn || WiFi.status() != WL_CONNECTED) return false;
+  return tcpLink.connected();
+}
+
+void tcpLinkService() {
+  if (!wifiOn || WiFi.status() != WL_CONNECTED) {
+    if (tcpWasUp) {
+      tcpWasUp = false;
+      tcpLink.stop();
+    }
+    return;
+  }
+  if (tcpLink.connected()) {
+    if (!tcpWasUp) {
+      tcpWasUp = true;
+      tcpLink.setNoDelay(true);
+      queue_statustext("TCP link up");
+    }
+    return;
+  }
+  tcpWasUp = false;
+  unsigned long now = millis();
+  if (now - lastTcpTry < 3000) return;
+  lastTcpTry = now;
+  if (tcpLink.connect(gcsIP, TCP_PORT, 2000)) {
+    tcpLink.setNoDelay(true);
+    queue_statustext("TCP link up");
+  } else {
+    tcpLink.stop();
+  }
+}
+
+
 // Адаптивна потужність передавача. Викликається не частіше ніж раз на
 // TX_POWER_CHECK_MS, щоб не смикати драйвер WiFi у кожному циклі loop().
 #define TX_POWER_CHECK_MS 2000
@@ -49,6 +90,7 @@ void wifiActivate() {
   WiFi.setSleep(false);
   WiFi.setAutoReconnect(true);
   udp.begin(UDP_PORT);
+  tcpLink.stop();
   WiFi.begin(cfg.sta_ssid, cfg.sta_pass);
   wifiActivating = true;
   wifiTryStart = millis();
@@ -85,6 +127,7 @@ void wifiFullRestart() {
   WiFi.setSleep(false);
   WiFi.setAutoReconnect(true);
   udp.begin(UDP_PORT);
+  tcpLink.stop();
   wifiActivating = true;
   wifiTryStart = millis();
   if (strlen(cfg.sta_ssid) > 0)

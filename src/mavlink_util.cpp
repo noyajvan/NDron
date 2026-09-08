@@ -2,6 +2,7 @@
 #include <math.h>
 #include "fsm_types.h"
 #include "mavlink_util.h"
+#include "wifi_mgr.h"
 
 // ===== Детекція крашу =====
 // Гейт: дрон летів (armed && висота > 2 м над базою). Таймери скидаються,
@@ -95,10 +96,19 @@ void fcWrite(const uint8_t* d, size_t len) {
 static unsigned long last_fwd_fail_ms = 0;
 void forwardToWiFi(const uint8_t* data, size_t len) {
   if (!wifiOn || WiFi.status() != WL_CONNECTED) return;
+  // TCP-плече (основний транспорт): без дублів, доставку гарантує TCP.
+  if (tcpConnected()) {
+    if (tcpLink.write(data, len) == 0) tcpLink.stop();
+    return;
+  }
+  // Fallback UDP (старі прошивки): 2 копії, бо 4G губить UDP.
   // Backoff після невдалої відправки: на слабкому 4G стек lwIP переповнюється
   // (ENOMEM) — даємо йому час спорожнитися, замість спамити Serial кожен пакет.
   unsigned long now = millis();
   if (last_fwd_fail_ms && now - last_fwd_fail_ms < 250) return;
+  udp.beginPacket(gcsIP, gcsPort);
+  udp.write(data, len);
+  if (udp.endPacket() == 0) last_fwd_fail_ms = now;
   udp.beginPacket(gcsIP, gcsPort);
   udp.write(data, len);
   if (udp.endPacket() == 0) last_fwd_fail_ms = now;
@@ -139,7 +149,6 @@ void send_heartbeat() {
       MAV_TYPE_ONBOARD_CONTROLLER, MAV_AUTOPILOT_INVALID, 0, 0, 0);
   uint16_t len = mavlink_msg_to_send_buffer(txBuf, &txMsg);
   fcWrite(txBuf, len);
-  forwardToWiFi(txBuf, len);
   forwardToWiFi(txBuf, len);
 }
 
@@ -378,9 +387,7 @@ void bridgeFCtoWiFi() {
         // глушив потік через 30 с тиші від GCS і MP «зависав».
         if (!spam) {
           uint16_t len = mavlink_msg_to_send_buffer(txBuf, &mavMsg);
-          // 4G губить ~90% UDP — шлемо 2 копії, щоб параметри/телеметрія доїжджали
-          // (одна копія = 90% втрат, дві = ~99% доставки).
-          forwardToWiFi(txBuf, len);
+          // Дублі лише для UDP-fallback; по TCP forwardToWiFi шле один раз.
           forwardToWiFi(txBuf, len);
         }
         handle_mavlink_message(&mavMsg);
@@ -391,6 +398,23 @@ void bridgeFCtoWiFi() {
 
 void bridgeWiFiToFC() {
   if (!wifiOn || WiFi.status() != WL_CONNECTED) return;
+  // Основний канал — TCP від реле: команди/запити MP -> FC.
+  if (tcpConnected()) {
+    for (int pass = 0; pass < 16; pass++) {
+      int n = tcpLink.read(bridgeBuf, sizeof(bridgeBuf));
+      if (n <= 0) break;
+      last_server_pkt_ms = millis();
+      if (!hasServer) {
+        hasServer = true;
+        static unsigned long last_do_connect_msg = 0;
+        if (millis() - last_do_connect_msg > 60000) {
+          queue_statustext("DO connected");
+          last_do_connect_msg = millis();
+        }
+      }
+      fcWrite(bridgeBuf, n);
+    }
+  }
   for (int pass = 0; pass < 16; pass++) {
     int sz = udp.parsePacket();
     if (sz <= 0) break;

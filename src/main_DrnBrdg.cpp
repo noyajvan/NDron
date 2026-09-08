@@ -142,6 +142,7 @@ void loop() {
   unsigned long now = millis();
 
   handleTerminalConfig();
+  tcpLinkService();
 
   if (wifiOn) bridgeWiFiToFC();
   bridgeFCtoWiFi();
@@ -220,7 +221,7 @@ void loop() {
     }
   }
 
-  if (hasServer && now - last_server_pkt_ms > 30000) {
+  if (hasServer && !tcpConnected() && now - last_server_pkt_ms > 30000) {
     hasServer = false;
   }
 
