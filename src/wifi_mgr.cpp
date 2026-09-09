@@ -42,39 +42,8 @@ void tcpLinkService() {
 }
 
 
-// Адаптивна потужність передавача. Викликається не частіше ніж раз на
-// TX_POWER_CHECK_MS, щоб не смикати драйвер WiFi у кожному циклі loop().
-#define TX_POWER_CHECK_MS 2000
-static const wifi_power_t tx_power_steps[] = {
-  WIFI_POWER_2dBm,  WIFI_POWER_5dBm,  WIFI_POWER_7dBm,
-  WIFI_POWER_8_5dBm, WIFI_POWER_11dBm, WIFI_POWER_13dBm,
-  WIFI_POWER_15dBm, WIFI_POWER_17dBm, WIFI_POWER_18_5dBm,
-  WIFI_POWER_19dBm, WIFI_POWER_19_5dBm
-};
-#define TX_STEP_COUNT (sizeof(tx_power_steps)/sizeof(tx_power_steps[0]))
-static uint8_t tx_power_idx = 0;
-
-void applyAdaptiveTxPower(bool connected) {
-  static unsigned long last_check = 0;
-  unsigned long now = millis();
-  if (now - last_check < TX_POWER_CHECK_MS) return;
-  last_check = now;
-
-  if (connected) {
-    // Зв'язок є — знижуємо потужність до середнього рівня (енергозбереження),
-    // але не нижче, щоб не втратити сигнал.
-    if (tx_power_idx > 4) tx_power_idx--;
-  } else {
-    // Зв'язку немає — тримаємо максимум потужності.
-    tx_power_idx = TX_STEP_COUNT - 1;
-  }
-
-  wifi_power_t level = tx_power_steps[tx_power_idx];
-  if (WiFi.getTxPower() != level) {
-    WiFi.setTxPower(level);
-    Serial.printf("[WIFI] TX power=%ddBm\n", (int)level);
-  }
-}
+// Адаптивну потужність прибрано: фіксовані 11 dBm — перевірене робоче
+// значення (на 2 dBm зв'язок слабший, максимум не потрібен).
 
 void wifiActivate() {
   if (wifiOn) return;
@@ -86,7 +55,7 @@ void wifiActivate() {
   delay(50);
   WiFi.mode(WIFI_STA);
   delay(50);
-  WiFi.setTxPower(WIFI_POWER_2dBm);
+  WiFi.setTxPower(WIFI_POWER_11dBm);
   WiFi.setSleep(false);
   WiFi.setAutoReconnect(true);
   udp.begin(UDP_PORT);
@@ -123,7 +92,7 @@ void wifiFullRestart() {
   delay(100);
   WiFi.mode(WIFI_STA);
   delay(50);
-  WiFi.setTxPower(WIFI_POWER_2dBm);
+  WiFi.setTxPower(WIFI_POWER_11dBm);
   WiFi.setSleep(false);
   WiFi.setAutoReconnect(true);
   udp.begin(UDP_PORT);

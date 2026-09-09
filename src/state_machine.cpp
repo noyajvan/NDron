@@ -10,6 +10,8 @@ bool flew_above_1m = false;
 float mission_base_alt = 0.0f;
 static unsigned long land_stop_ms = 0;
 static unsigned long tip_bounce_ms = 0;
+static unsigned long cal_pct_ms = 0;
+static bool cal_accept_sent = false;
 
 void updateSystemState() {
   unsigned long now = millis();
@@ -72,9 +74,13 @@ void updateSystemState() {
         cal_cmd_sent = false;
         cal_success = false;
         cal_completion_pct = 0;
+        cal_fitness = 0.0f;
         last_cal_pct = 0;
         cal_retries = 0;
         cal_dia_reported = false;
+        cal_accept_sent = false;
+        cal_fc_failed = false;
+        cal_pct_ms = state_entry_ms;
         send_statustext_udp("Bridge: compass calibration");
         break;
       case STATE_CALIBRATION_END:
@@ -168,6 +174,28 @@ void updateSystemState() {
       }
       if (now - ekf_att_stable_ms < 5000) break;
 
+      // Сине вікно калібрування (MAG_OK) відкриваємо лише коли FC готова:
+      // магнітометр healthy (SYS_STATUS) і політник працює >= 20 с.
+      // Раніше обертання під час старту FC давало сміття (cal FAILED fit~22).
+      // Форс-перехід через 60 с після стабілізації EKF, щоб не блокувати політ.
+      bool fc_init_done = mag_sensor_ready &&
+                          fc_hb_first_ms != 0 &&
+                          (now - fc_hb_first_ms) > 20000;
+      if (!fc_init_done) {
+        static unsigned long init_wait_log = 0;
+        if ((now - ekf_att_stable_ms) > 60000) {
+          Serial.println("[S] FC init timeout, forcing MAG_OK");
+          state = STATE_MAG_OK;
+          break;
+        }
+        if (now - init_wait_log > 5000) {
+          init_wait_log = now;
+          Serial.println("[S] waiting FC init (mag/SYS_STATUS)");
+          queue_statustext("wait FC init");
+        }
+        break;
+      }
+
       state = STATE_MAG_OK;
       Serial.println("[S] EKF_ATT OK -> MAG_OK");
       break;
@@ -221,42 +249,82 @@ void updateSystemState() {
         sendStartMagCal();
         send_statustext_udp("Bridge: calibration started");
         cal_cmd_sent = true;
+        last_cal_pct = 0;
+        cal_accept_sent = false;
+        cal_fc_failed = false;
+        cal_pct_ms = state_entry_ms;
         Serial.println("[CAL] command sent, waiting progress...");
       }
-      if (cal_completion_pct > 0 && cal_completion_pct - last_cal_pct >= 10) {
+      if (cal_completion_pct != last_cal_pct) {
+        if (cal_completion_pct == 100 ||
+            cal_completion_pct > last_cal_pct + 5 ||
+            cal_completion_pct < last_cal_pct) {
+          char buf[50];
+          snprintf(buf, sizeof(buf), "Cal: %d%%",
+                   cal_completion_pct);
+          queue_statustext(buf);
+          Serial.printf("[CAL] progress %d%%\n",
+                        cal_completion_pct);
+        }
         last_cal_pct = cal_completion_pct;
-        char buf[32];
-        snprintf(buf, sizeof(buf), "Cal: %d%%", cal_completion_pct);
-        queue_statustext(buf);
-        send_statustext(buf);
-        Serial.printf("[CAL] progress %d%%\n", cal_completion_pct);
+        cal_pct_ms = now;
       }
       if (cal_success) {
-        state = STATE_CALIBRATION_END;
-        Serial.println("[CAL] SUCCESS -> CALIBRATION_END");
-        if (cal_dia_x != 0.0f) {
-          bool dia_ok = (fabs(1.0f - cal_dia_x) <= DIA_TOLERANCE) &&
-                        (fabs(1.0f - cal_dia_y) <= DIA_TOLERANCE) &&
-                        (fabs(1.0f - cal_dia_z) <= DIA_TOLERANCE);
-          if (!dia_ok) {
-            queue_statustext("DIA outside 15%");
-          }
+        bool dia_ok = cal_dia_x != 0.0f &&
+                      fabs(1.0f - cal_dia_x) <= DIA_TOLERANCE &&
+                      fabs(1.0f - cal_dia_y) <= DIA_TOLERANCE &&
+                      fabs(1.0f - cal_dia_z) <= DIA_TOLERANCE;
+        if (!dia_ok) {
+          // REPORT прийшов, але DIA поза допуском (0.85-1.15) — це сміттєві
+          // дані (наводки/кривий збір). Не зараховуємо: повторюємо спробу.
+          Serial.println("[CAL] SUCCESS but DIA bad -> retry");
+          queue_statustext("DIA bad - auto retry");
+          cal_success = false;
+          cal_fc_failed = true;   // активує retry/give-up нижче
+        } else {
+          state = STATE_CALIBRATION_END;
+          Serial.println("[CAL] SUCCESS -> CALIBRATION_END");
         }
       }
 
-      // Повторні спроби калібрування
-      unsigned long cal_time = now - state_entry_ms;
-      if (!cal_success && cal_cmd_sent && cal_time > 30000) {
+      // Анти-зависання на 95-99%: дані майже зібрані, але FC не фіналізує
+      // (шум/наводки). Примусово приймаємо поточний набір — не частіше ніж
+      // раз на спробу і тільки коли прогрес зупинився на ~95+.
+      unsigned long cal_elapsed = now - state_entry_ms;
+      bool progress_stalled = cal_pct_ms != 0 && (now - cal_pct_ms) > 8000;
+      if (!cal_success && cal_cmd_sent && cal_completion_pct >= 95 &&
+          !cal_accept_sent && progress_stalled && cal_elapsed > 15000) {
+        sendAcceptMagCal();
+        cal_accept_sent = true;
+        queue_statustext("Cal 95%+, accepting");
+        Serial.println("[CAL] near-done, sending ACCEPT");
+      }
+
+      // Таймаут спроби: немає прогресу 8 с, жорсткий ліміт 60 с,
+      // або FC сама повідомила FAILED (cal_fc_failed).
+      bool fc_failed = cal_fc_failed;
+      cal_fc_failed = false;
+      bool attempt_timeout = (!cal_success && cal_cmd_sent &&
+                              cal_elapsed > 60000) ||
+                             (progress_stalled && cal_elapsed > 10000);
+      if (attempt_timeout || (fc_failed && cal_elapsed > 5000)) {
         cal_retries++;
         if (cal_retries < CAL_MAX_RETRIES) {
           Serial.printf("[CAL] timeout, retry %d/%d\n", cal_retries, CAL_MAX_RETRIES);
           cal_cmd_sent = false;
           cal_success = false;
           state_entry_ms = now;
+          cal_accept_sent = false;
+          cal_pct_ms = now;
+          last_cal_pct = 0;
           send_statustext_udp("Bridge: calibration retry");
         } else {
-          Serial.println("[CAL] max retries, skip calibration");
-          send_statustext_udp("Bridge: calibration failed, skipping");
+          // Калібрування почалося по нахилу — після невдачі НЕ переходимо в
+          // політний цикл: тільки power-cycle дозволяє ARM (mdfly=60).
+          Serial.println("[CAL] max retries, power cycle required");
+          send_statustext_udp("Bridge: calibration failed, power cycle");
+          queue_statustext("Cal failed - power cycle FC");
+          mdfly = 60;
           state = STATE_NO_ARM;
         }
       }

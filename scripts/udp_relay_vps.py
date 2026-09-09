@@ -26,6 +26,7 @@ drone_udp_t = 0.0
 drone_tcp = None       # socket активного TCP-дрона
 drone_tcp_t = 0.0
 tcp_clients = {}       # GCS TCP socket -> addr
+gcs_send_err = {}      # GCS TCP socket -> consecutive send errors
 udp_gcs = {}           # GCS UDP addr -> last_seen
 
 def log(msg):
@@ -59,22 +60,27 @@ def send_to_drone(data):
 def drop_tcp_client(s):
     with lock:
         addr = tcp_clients.pop(s, None)
+    gcs_send_err.pop(s, None)
     close_sock(s)
     if addr:
         log("TCP GCS send error, dropping: %s" % addr[0])
 
 def broadcast_to_gcs(data):
     """Drone -> всі GCS (TCP + свіжі UDP)."""
-    now = time.time()
     dead = []
     for s in list(tcp_clients.keys()):
         try:
             s.sendall(data)
-        except socket.timeout:
-            log("TCP GCS send timeout, dropping")
-            dead.append(s)
-        except Exception:
-            dead.append(s)
+            gcs_send_err.pop(s, None)
+        except Exception as e:
+            n = gcs_send_err.get(s, 0) + 1
+            gcs_send_err[s] = n
+            if n == 1:
+                log("TCP GCS send err (%s) to %s" %
+                    (type(e).__name__, tcp_clients.get(s, ('?',))[0]))
+            if n > 3:
+                log("TCP GCS dropping after %d send errors" % n)
+                dead.append(s)
     for s in dead:
         drop_tcp_client(s)
     for a in list(udp_gcs.keys()):
@@ -116,7 +122,7 @@ def tcp_server(port, handler, name):
             continue
         except Exception:
             continue
-        conn.settimeout(2.0)
+        conn.settimeout(5.0)
         try:
             conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         except Exception:

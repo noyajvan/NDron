@@ -35,6 +35,8 @@ uint8_t txBuf[MAVLINK_MAX_PACKET_LEN];
 
 SystemState state = STATE_INIT_WIFI;
 bool heartbeat_received = false;
+bool mag_sensor_ready = false;
+unsigned long fc_hb_first_ms = 0;
 uint32_t current_custom_mode = 0;
 bool is_armed = false;
 uint8_t system_status = 0;
@@ -61,9 +63,12 @@ bool mag_error_msg_sent = false;
 bool mag_ok_msg_sent   = false;
 bool cal_cmd_sent      = false;
 bool cal_success       = false;
+bool cal_fc_failed     = false;
 bool cal_finalized     = false;
 uint8_t cal_completion_pct = 0;
+float cal_fitness = 0.0f;
 float cal_dia_x = 0, cal_dia_y = 0, cal_dia_z = 0;
+float cal_ofs_x = 0, cal_ofs_y = 0, cal_ofs_z = 0;
 uint8_t cal_retries = 0;
 bool cal_dia_reported = false;
 bool no_arm_init       = false;
@@ -102,7 +107,7 @@ void setup() {
   Serial.begin(115200);
   delay(100);
 
-  setCpuFrequencyMhz(160);
+  setCpuFrequencyMhz(80);
   btStop();
   loadConfig();
   fcBegin(cfg.baud, 44, 43);

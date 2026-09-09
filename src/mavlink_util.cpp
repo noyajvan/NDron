@@ -212,6 +212,7 @@ void handle_mavlink_message(mavlink_message_t* msg) {
       mavlink_msg_heartbeat_decode(msg, &hb);
       fc_sys_id = msg->sysid;
       heartbeat_received = true;
+      if (fc_hb_first_ms == 0) fc_hb_first_ms = millis();
       current_custom_mode = hb.custom_mode;
       system_status = hb.system_status;
       is_armed = (hb.base_mode & MAV_MODE_FLAG_SAFETY_ARMED) != 0;
@@ -260,6 +261,10 @@ void handle_mavlink_message(mavlink_message_t* msg) {
       battery_voltage = ss.voltage_battery / 1000.0f;
       battery_remaining = ss.battery_remaining;
       sys_status_received = true;
+      mag_sensor_ready =
+          (ss.onboard_control_sensors_present & MAV_SYS_STATUS_SENSOR_3D_MAG) &&
+          (ss.onboard_control_sensors_enabled & MAV_SYS_STATUS_SENSOR_3D_MAG) &&
+          (ss.onboard_control_sensors_health   & MAV_SYS_STATUS_SENSOR_3D_MAG);
       break;
     }
 
@@ -307,7 +312,8 @@ void handle_mavlink_message(mavlink_message_t* msg) {
       static uint8_t last_cal_status = 255;
       if (cal.cal_status != last_cal_status || (cal.cal_status == 4 && !cal_success)) {
         last_cal_status = cal.cal_status;
-        Serial.printf("[CAL] status=%d pct=%d compass=%d\n", cal.cal_status, cal.completion_pct, cal.compass_id);
+        Serial.printf("[CAL] status=%d pct=%d compass=%d\n",
+          cal.cal_status, cal.completion_pct, cal.compass_id);
       }
       if (cal.cal_status == 4) {
         Serial.println("[CAL] PROGRESS SUCCESS");
@@ -319,21 +325,58 @@ void handle_mavlink_message(mavlink_message_t* msg) {
     case MAVLINK_MSG_ID_MAG_CAL_REPORT: {
       mavlink_mag_cal_report_t rep;
       mavlink_msg_mag_cal_report_decode(msg, &rep);
-      Serial.printf("[CAL] report status=%d fitness=%.2f ofs=(%.1f,%.1f,%.1f)\n",
+      Serial.printf("[CAL] report status=%d fitness=%.3f ofs=(%.1f,%.1f,%.1f)\n",
         rep.cal_status, rep.fitness, rep.ofs_x, rep.ofs_y, rep.ofs_z);
+      cal_dia_x = rep.diag_x;
+      cal_dia_y = rep.diag_y;
+      cal_dia_z = rep.diag_z;
+      cal_ofs_x = rep.ofs_x;
+      cal_ofs_y = rep.ofs_y;
+      cal_ofs_z = rep.ofs_z;
+      cal_fitness = rep.fitness;
       if (rep.cal_status == 4) {
         Serial.println("[CAL] REPORT SUCCESS");
-        cal_dia_x = rep.diag_x;
-        cal_dia_y = rep.diag_y;
-        cal_dia_z = rep.diag_z;
         cal_success = true;
         if (!cal_dia_reported) {
           cal_dia_reported = true;
-          char buf[72];
-          snprintf(buf, sizeof(buf), "DIA X=%.3f Y=%.3f Z=%.3f",
-            rep.diag_x, rep.diag_y, rep.diag_z);
+          queue_statustext("Calibration coefficients:");
+          char buf[50];
+          snprintf(buf, sizeof(buf), "DIA X: %.2f (0.85-1.15)%s",
+                   rep.diag_x, (fabs(1.0f - rep.diag_x) <= DIA_TOLERANCE) ? " ok" : " !");
+          queue_statustext(buf);
+          snprintf(buf, sizeof(buf), "DIA Y: %.2f (0.85-1.15)%s",
+                   rep.diag_y, (fabs(1.0f - rep.diag_y) <= DIA_TOLERANCE) ? " ok" : " !");
+          queue_statustext(buf);
+          snprintf(buf, sizeof(buf), "DIA Z: %.2f (0.85-1.15)%s",
+                   rep.diag_z, (fabs(1.0f - rep.diag_z) <= DIA_TOLERANCE) ? " ok" : " !");
+          queue_statustext(buf);
+          snprintf(buf, sizeof(buf), "OFS X: %.0f (-1000..1000)%s",
+                   rep.ofs_x, (fabsf(rep.ofs_x) <= 1000.0f) ? " ok" : " !");
+          queue_statustext(buf);
+          snprintf(buf, sizeof(buf), "OFS Y: %.0f (-1000..1000)%s",
+                   rep.ofs_y, (fabsf(rep.ofs_y) <= 1000.0f) ? " ok" : " !");
+          queue_statustext(buf);
+          snprintf(buf, sizeof(buf), "OFS Z: %.0f (-1000..1000)%s",
+                   rep.ofs_z, (fabsf(rep.ofs_z) <= 1000.0f) ? " ok" : " !");
           queue_statustext(buf);
         }
+      } else if (rep.cal_status == 5 || rep.cal_status == 6) {
+        cal_fc_failed = true;
+        static uint8_t last_fail_status = 255;
+        static float last_fail_fit = -1.0f;
+        if (rep.cal_status != last_fail_status ||
+            fabsf(rep.fitness - last_fail_fit) > 0.01f) {
+          last_fail_status = rep.cal_status;
+          last_fail_fit = rep.fitness;
+          char buf[50];
+          if (rep.cal_status == 5)
+            snprintf(buf, sizeof(buf), "Cal FAILED fit=%.2f", rep.fitness);
+          else
+            snprintf(buf, sizeof(buf), "Cal bad orientation fit=%.2f", rep.fitness);
+          queue_statustext(buf);
+        }
+        Serial.printf("[CAL] REPORT %s\n",
+                      rep.cal_status == 5 ? "FAILED" : "BAD_ORIENTATION");
       }
       break;
     }

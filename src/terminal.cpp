@@ -2,6 +2,7 @@
 #include "terminal.h"
 #include "config.h"
 #include "mavlink_util.h"
+#include "wifi_mgr.h"
 
 void handleTerminalConfig() {
   while (Serial.available() > 0) {
@@ -60,6 +61,14 @@ void handleTerminalConfig() {
             Serial.printf(">> SYSID = %u\n", cfg.sys_id);
           }
         }
+        else if (inputBuffer.equalsIgnoreCase("WIFI OFF")) {
+          wifiDeactivate();
+          Serial.println(">> WiFi OFF");
+        }
+        else if (inputBuffer.equalsIgnoreCase("WIFI ON")) {
+          wifiActivate();
+          Serial.println(">> WiFi ON");
+        }
         else if (inputBuffer.equalsIgnoreCase("RELAY")) {
           sendMavlinkSetRelay();
           Serial.println(">> RELAY sent");
@@ -75,7 +84,7 @@ void handleTerminalConfig() {
           ESP.restart();
         }
         else {
-          Serial.println("CMD: STATUS | SSID=name | PASS=pass | BAUD= | SYSID= | RELAY | DISARM | SAVE");
+          Serial.println("CMD: STATUS | SSID=name | PASS=pass | BAUD= | SYSID= | WIFI OFF | WIFI ON | RELAY | DISARM | SAVE");
         }
         inputBuffer = "";
       }
