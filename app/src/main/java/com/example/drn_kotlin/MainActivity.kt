@@ -41,14 +41,21 @@ class MainActivity : AppCompatActivity() {
         videoStats = findViewById(R.id.videoStats)
         usbStatus = findViewById(R.id.usbStatus)
 
-        // Show RTP video stream instructions for Mission Planner
+        // Показуємо реальну Tailscale IP телефону та URL для перегляду
+        val ip = getTailscaleIp()
         val statusText = findViewById<TextView>(R.id.status)
-        statusText.text = "MJPEG: http://<IP_ТЕЛЕФОНА>:8888/stream\n" +
-            "Перегляд: http://<IP_ТЕЛЕФОНА>:8888/\n" +
+        statusText.text = "MJPEG: http://$ip:8888/stream\n" +
+            "Перегляд: http://$ip:8888/\n" +
+            "Health: http://$ip:8888/health\n" +
             "Telemetry: UDP 14550 -> 100.104.253.54"
 
         setupSeekBars()
-        registerReceiver(statsReceiver, IntentFilter(TelemetryBridgeService.STATS_UPDATE), RECEIVER_EXPORTED)
+        ContextCompat.registerReceiver(
+            this,
+            statsReceiver,
+            IntentFilter(TelemetryBridgeService.STATS_UPDATE),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
 
         if (arePermissionsGranted()) {
             startBridgeService()
@@ -89,7 +96,7 @@ class MainActivity : AppCompatActivity() {
             if (value is Float) putExtra(extraKey, value)
             if (value is Int) putExtra(extraKey, value)
         }
-        startService(intent)
+        ContextCompat.startForegroundService(this, intent)
     }
 
     private fun arePermissionsGranted(): Boolean {
@@ -157,6 +164,32 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startBridgeService() {
-        startService(Intent(this, TelemetryBridgeService::class.java).setAction(TelemetryBridgeService.ACTION_START))
+        val intent = Intent(this, TelemetryBridgeService::class.java)
+            .setAction(TelemetryBridgeService.ACTION_START)
+        ContextCompat.startForegroundService(this, intent)
+    }
+
+    /**
+     * Повертає IP-адресу інтерфейсу Tailscale (100.x.x.x), якщо він піднятий.
+     * Інакше — першу non-loopback IPv4 адресу.
+     */
+    private fun getTailscaleIp(): String {
+        try {
+            val interfaces = java.net.NetworkInterface.getNetworkInterfaces()
+            var fallback = "<IP_ТЕЛЕФОНА>"
+            for (nif in interfaces) {
+                if (!nif.isUp || nif.isLoopback) continue
+                for (addr in nif.inetAddresses) {
+                    if (addr is java.net.Inet4Address && !addr.isLoopbackAddress) {
+                        val host = addr.hostAddress ?: continue
+                        if (host.startsWith("100.")) return host
+                        if (fallback == "<IP_ТЕЛЕФОНА>") fallback = host
+                    }
+                }
+            }
+            return fallback
+        } catch (e: Exception) {
+            return "<IP_ТЕЛЕФОНА>"
+        }
     }
 }

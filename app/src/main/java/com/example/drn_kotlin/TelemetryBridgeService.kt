@@ -1,7 +1,6 @@
 package com.example.drn_kotlin
 
 import android.Manifest
-import android.R
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -28,6 +27,7 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleService
+import fi.iki.elonen.NanoHTTPD
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.Executors
 
@@ -70,11 +70,16 @@ class TelemetryBridgeService : LifecycleService() {
         try {
             // NanoHTTPD(port) binds to all interfaces by default (0.0.0.0)
             mjpegServer = MjpegServer(SERVER_PORT)
-            mjpegServer?.start()
-            mavlinkBridge = UsbMavlinkBridge(this, GCS_IP, MAVLINK_UDP_PORT)
-            Log.d(TAG, "MJPEG Server & MAVLink Bridge started")
+            mjpegServer?.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
+            Log.i(TAG, "MJPEG Server started on 0.0.0.0:$SERVER_PORT (running=${mjpegServer?.isRunning()})")
         } catch (e: Exception) {
-            Log.e(TAG, "Start error", e)
+            Log.e(TAG, "MJPEG Server start FAILED on port $SERVER_PORT", e)
+        }
+        try {
+            mavlinkBridge = UsbMavlinkBridge(this, GCS_IP, MAVLINK_UDP_PORT)
+            Log.d(TAG, "MAVLink Bridge created")
+        } catch (e: Exception) {
+            Log.e(TAG, "MAVLink Bridge init FAILED", e)
         }
     }
 
@@ -95,8 +100,14 @@ class TelemetryBridgeService : LifecycleService() {
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
             }
-            ACTION_SET_ZOOM -> setZoom(intent.getFloatExtra(EXTRA_ZOOM, 1.0f))
-            ACTION_SET_QUALITY -> jpegQuality = intent.getIntExtra(EXTRA_QUALITY, 40).coerceIn(1, 100)
+            ACTION_SET_ZOOM -> {
+                startForegroundServiceInternal()
+                setZoom(intent.getFloatExtra(EXTRA_ZOOM, 1.0f))
+            }
+            ACTION_SET_QUALITY -> {
+                startForegroundServiceInternal()
+                jpegQuality = intent.getIntExtra(EXTRA_QUALITY, 40).coerceIn(1, 100)
+            }
         }
         return START_STICKY
     }
@@ -224,13 +235,22 @@ class TelemetryBridgeService : LifecycleService() {
     private fun startForegroundServiceInternal() {
         val notification = createNotification("Бортовий агент активний")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
-                    type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
-                }
+            var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            val cameraGranted = ContextCompat.checkSelfPermission(
+                this, Manifest.permission.CAMERA
+            ) == PackageManager.PERMISSION_GRANTED
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE && cameraGranted) {
+                type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
             }
-            startForeground(NOTIFICATION_ID, notification, type)
+            try {
+                startForeground(NOTIFICATION_ID, notification, type)
+            } catch (e: SecurityException) {
+                Log.e(TAG, "startForeground with type=$type failed, retry without camera", e)
+                val fallback = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                startForeground(NOTIFICATION_ID, notification, fallback)
+            }
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
@@ -240,7 +260,7 @@ class TelemetryBridgeService : LifecycleService() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Drone Bridge Agent")
             .setContentText(text)
-            .setSmallIcon(R.drawable.stat_notify_sync)
+            .setSmallIcon(android.R.drawable.stat_notify_sync)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setOngoing(true)
             .build()

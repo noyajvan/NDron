@@ -57,14 +57,14 @@ class UsbMavlinkBridge(private val context: Context, private val gcsIp: String, 
         // Thread 2: UDP -> USB (Optional, for commands from GCS)
         executor.execute {
             val buffer = ByteArray(4096)
-            val socket = DatagramSocket(14550) // Listen for packets back from GCS
+            val socket = DatagramSocket(gcsPort) // Listen for packets back from GCS
             while (running) {
                 try {
                     val packet = DatagramPacket(buffer, buffer.size)
                     socket.receive(packet)
                     serialPort?.write(packet.data.copyOfRange(0, packet.length), 1000)
                 } catch (e: Exception) {
-                    Log.e(TAG, "UDP to USB error", e)
+                    if (running) Log.e(TAG, "UDP to USB error", e)
                 }
             }
         }

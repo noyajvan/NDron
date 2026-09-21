@@ -19,6 +19,8 @@ class MjpegServer(port: Int) : NanoHTTPD(port) {
         currentFrame.set(jpegData)
     }
 
+    fun isRunning(): Boolean = wasStarted()
+
     override fun serve(session: IHTTPSession): Response {
         Log.i(TAG, "New request from ${session.remoteIpAddress}: ${session.uri}")
         if (session.uri == "/sdp") {
@@ -49,6 +51,11 @@ class MjpegServer(port: Int) : NanoHTTPD(port) {
             """.trimIndent()
             return newFixedLengthResponse(Response.Status.OK, "text/html", html)
         }
+        if (session.uri == "/health") {
+            val frame = currentFrame.get()
+            val body = "ok\nframeBytes=${frame?.size ?: 0}\n"
+            return newFixedLengthResponse(Response.Status.OK, "text/plain", body)
+        }
         if (session.uri == "/stream") {
             // Використовуємо чіткий формат MJPEG
             val response = newChunkedResponse(
@@ -72,10 +79,15 @@ class MjpegServer(port: Int) : NanoHTTPD(port) {
                 // Чекаємо на новий кадр
                 var frame = currentFrame.get()
                 while (frame == null) {
-                    Thread.sleep(10)
+                    try {
+                        Thread.sleep(10)
+                    } catch (e: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        return -1
+                    }
                     frame = currentFrame.get()
                 }
-                
+
                 // Формуємо блок кадру за стандартом MJPEG
                 val header = "\r\n--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${frame.size}\r\n\r\n"
                 val footer = "\r\n"
@@ -84,11 +96,15 @@ class MjpegServer(port: Int) : NanoHTTPD(port) {
             }
             return buffer!!.read()
         }
-        
+
         override fun read(b: ByteArray, off: Int, len: Int): Int {
             if (buffer == null || buffer!!.available() <= 0) {
-                if (read() == -1) return -1
-                // read() ініціалізує buffer, тепер читаємо з нього
+                val first = read()
+                if (first == -1) return -1
+                b[off] = first.toByte()
+                if (len == 1) return 1
+                val read = buffer!!.read(b, off + 1, len - 1)
+                return if (read <= 0) 1 else read + 1
             }
             return buffer!!.read(b, off, len)
         }
