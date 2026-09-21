@@ -15,7 +15,7 @@ class MjpegServer(port: Int) : NanoHTTPD(port) {
     }
 
     override fun serve(session: IHTTPSession): Response {
-        Log.d(TAG, "New request from ${session.remoteIpAddress}: ${session.uri}")
+        Log.i(TAG, "New request from ${session.remoteIpAddress}: ${session.uri}")
         if (session.uri == "/stream") {
             // Використовуємо чіткий формат MJPEG
             val response = newChunkedResponse(
