@@ -82,8 +82,17 @@ class UsbMavlinkBridge(private val context: Context, private val gcsIp: String, 
 
     fun stop() {
         running = false
-        serialPort?.close()
-        udpSocket?.close()
+        try {
+            serialPort?.close()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error closing serial port", e)
+        }
+        try {
+            udpSocket?.close()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error closing UDP socket", e)
+        }
+        executor.shutdownNow()
         Log.d(TAG, "Bridge stopped")
     }
 }

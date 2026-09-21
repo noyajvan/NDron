@@ -65,9 +65,11 @@ class MjpegServer(port: Int) : NanoHTTPD(port) {
 
         override fun read(): Int {
             if (buffer == null || buffer!!.available() <= 0) {
-                // Чекаємо на новий кадр
+                // Чекаємо на новий кадр, але не блокуємося назавжди —
+                // якщо сервер зупинено, повертаємо -1, щоб NanoHTTPD закрив з'єднання.
                 var frame = currentFrame.get()
                 while (frame == null) {
+                    if (!isRunning()) return -1
                     try {
                         Thread.sleep(10)
                     } catch (e: InterruptedException) {
@@ -99,7 +101,8 @@ class MjpegServer(port: Int) : NanoHTTPD(port) {
         }
 
         override fun available(): Int {
-            return buffer?.available() ?: 0
+            // Повертаємо 1, якщо є кадр, щоб NanoHTTPD не закрив з'єднання передчасно.
+            return buffer?.available() ?: if (currentFrame.get() != null) 1 else 0
         }
     }
 }

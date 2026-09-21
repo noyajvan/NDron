@@ -39,7 +39,8 @@ class TelemetryBridgeService : LifecycleService() {
     private var mjpegServer: MjpegServer? = null
     private var mavlinkBridge: UsbMavlinkBridge? = null
     private var camera: Camera? = null
-    
+    private var cameraStarted = false
+
     private var jpegQuality = 40
     private var currentZoom = 1.0f
 
@@ -91,7 +92,10 @@ class TelemetryBridgeService : LifecycleService() {
             ACTION_START -> {
                 acquireWakeLock()
                 startForegroundServiceInternal()
-                startCamera()
+                if (!cameraStarted) {
+                    cameraStarted = true
+                    startCamera()
+                }
                 mavlinkBridge?.start()
             }
             ACTION_STOP -> {
@@ -211,6 +215,7 @@ class TelemetryBridgeService : LifecycleService() {
     }
 
     override fun onDestroy() {
+        cameraStarted = false
         mavlinkBridge?.stop()
         mjpegServer?.stop()
         releaseWakeLock()

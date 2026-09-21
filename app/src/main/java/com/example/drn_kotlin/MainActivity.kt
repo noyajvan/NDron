@@ -42,13 +42,7 @@ class MainActivity : AppCompatActivity() {
         usbStatus = findViewById(R.id.usbStatus)
 
         // Показуємо реальну Tailscale IP телефону та URL для перегляду
-        val ip = getTailscaleIp()
-        val statusText = findViewById<TextView>(R.id.status)
-        statusText.text = "MJPEG: http://$ip:8888/stream\n" +
-            "Перегляд: http://$ip:8888/\n" +
-            "Health: http://$ip:8888/health\n" +
-            "Telemetry: UDP 14550 -> 100.104.253.54\n" +
-            "VLC: vlc http://$ip:8888/stream"
+        updateStatusText()
 
         setupSeekBars()
         ContextCompat.registerReceiver(
@@ -65,6 +59,16 @@ class MainActivity : AppCompatActivity() {
         }
 
         handleIntent(intent)
+    }
+
+    private fun updateStatusText() {
+        val ip = getTailscaleIp()
+        val statusText = findViewById<TextView>(R.id.status)
+        statusText.text = "MJPEG: http://$ip:8888/stream\n" +
+            "Перегляд: http://$ip:8888/\n" +
+            "Health: http://$ip:8888/health\n" +
+            "Telemetry: UDP 14550 -> 100.104.253.54\n" +
+            "VLC: vlc http://$ip:8888/stream"
     }
 
     private fun setupSeekBars() {
@@ -115,6 +119,12 @@ class MainActivity : AppCompatActivity() {
         if (requestCode == 101 && arePermissionsGranted()) {
             startBridgeService()
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Оновлюємо IP при поверненні в застосунок (Tailscale міг піднятися пізніше)
+        updateStatusText()
     }
 
     override fun onDestroy() {
@@ -187,6 +197,7 @@ class MainActivity : AppCompatActivity() {
                 for (addr in nif.inetAddresses) {
                     if (addr is java.net.Inet4Address && !addr.isLoopbackAddress) {
                         val host = addr.hostAddress ?: continue
+                        // Tailscale використовує діапазон 100.64.0.0/10 (CGNAT)
                         if (host.startsWith("100.")) return host
                         if (fallback == "<IP_ТЕЛЕФОНА>") fallback = host
                     }
