@@ -10,12 +10,35 @@ class MjpegServer(port: Int) : NanoHTTPD(port) {
     private val currentFrame = AtomicReference<ByteArray?>(null)
     private val TAG = "MjpegServer"
 
+    companion object {
+        // Порт RTP-відео (має збігатися з TelemetryBridgeService.VIDEO_UDP_PORT)
+        const val VIDEO_PORT = 5600
+    }
+
     fun updateFrame(jpegData: ByteArray) {
         currentFrame.set(jpegData)
     }
 
     override fun serve(session: IHTTPSession): Response {
         Log.i(TAG, "New request from ${session.remoteIpAddress}: ${session.uri}")
+        if (session.uri == "/sdp") {
+            // SDP-опис H.264/RTP потоку для Mission Planner (GStreamer)
+            val sdp = buildString {
+                append("v=0\r\n")
+                append("o=- 0 0 IN IP4 0.0.0.0\r\n")
+                append("s=DRN H264 Stream\r\n")
+                append("c=IN IP4 0.0.0.0\r\n")
+                append("t=0 0\r\n")
+                append("m=video ${MjpegServer.VIDEO_PORT} RTP/AVP 96\r\n")
+                append("a=rtpmap:96 H264/90000\r\n")
+                append("a=fmtp:96 packetization-mode=1\r\n")
+            }
+            return newFixedLengthResponse(
+                Response.Status.OK,
+                "application/sdp",
+                sdp
+            )
+        }
         if (session.uri == "/stream") {
             // Використовуємо чіткий формат MJPEG
             val response = newChunkedResponse(
