@@ -11,7 +11,8 @@ class MjpegServer(port: Int) : NanoHTTPD(port) {
     private val TAG = "MjpegServer"
 
     companion object {
-        // Порт RTP-відео (має збігатися з TelemetryBridgeService.VIDEO_UDP_PORT)
+        // Порт RTP-відео зарезервовано, але RTP не реалізовано.
+        // Реальний потік — MJPEG на HTTP-порті, переданому в конструктор.
         const val VIDEO_PORT = 5600
     }
 
@@ -24,24 +25,12 @@ class MjpegServer(port: Int) : NanoHTTPD(port) {
     override fun serve(session: IHTTPSession): Response {
         Log.i(TAG, "New request from ${session.remoteIpAddress}: ${session.uri}")
         if (session.uri == "/sdp") {
-            // УВАГА: H.264/RTP-енкодер у цьому проекті НЕ реалізовано.
-            // Реально доступний лише MJPEG-потік на /stream (порт 8888).
-            // Повертаємо SDP для MJPEG-over-RTP (payload 26 = JPEG), щоб клієнти
-            // (VLC, GStreamer) могли підключитися до реального потоку.
-            val sdp = buildString {
-                append("v=0\r\n")
-                append("o=- 0 0 IN IP4 0.0.0.0\r\n")
-                append("s=DRN MJPEG Stream\r\n")
-                append("c=IN IP4 0.0.0.0\r\n")
-                append("t=0 0\r\n")
-                append("m=video ${MjpegServer.VIDEO_PORT} RTP/AVP 26\r\n")
-                append("a=rtpmap:26 JPEG/90000\r\n")
-            }
-            return newFixedLengthResponse(
-                Response.Status.OK,
-                "application/sdp",
-                sdp
-            )
+            // H.264/RTP-енкодер у цьому проекті НЕ реалізовано.
+            // Єдиний реальний потік — MJPEG на /stream (порт 8888).
+            // Повертаємо текстову підказку замість фальшивого SDP.
+            val body = "H.264/RTP not implemented.\n" +
+                "Use MJPEG stream: http://<IP>:8888/stream\n"
+            return newFixedLengthResponse(Response.Status.OK, "text/plain", body)
         }
         if (session.uri == "/" || session.uri == "/index.html") {
             val html = """
@@ -57,10 +46,11 @@ class MjpegServer(port: Int) : NanoHTTPD(port) {
             return newFixedLengthResponse(Response.Status.OK, "text/plain", body)
         }
         if (session.uri == "/stream") {
-            // Використовуємо чіткий формат MJPEG
+            // Використовуємо чіткий формат MJPEG.
+            // УВАГА: boundary у заголовку БЕЗ провідних "--" (дефіси додаються у тілі).
             val response = newChunkedResponse(
-                Response.Status.OK, 
-                "multipart/x-mixed-replace; boundary=--frame", 
+                Response.Status.OK,
+                "multipart/x-mixed-replace; boundary=frame",
                 MjpegStream()
             )
             response.addHeader("Cache-Control", "no-cache, private")

@@ -47,7 +47,8 @@ class MainActivity : AppCompatActivity() {
         statusText.text = "MJPEG: http://$ip:8888/stream\n" +
             "Перегляд: http://$ip:8888/\n" +
             "Health: http://$ip:8888/health\n" +
-            "Telemetry: UDP 14550 -> 100.104.253.54"
+            "Telemetry: UDP 14550 -> 100.104.253.54\n" +
+            "VLC: vlc http://$ip:8888/stream"
 
         setupSeekBars()
         ContextCompat.registerReceiver(
