@@ -41,9 +41,9 @@ class MainActivity : AppCompatActivity() {
         videoStats = findViewById(R.id.videoStats)
         usbStatus = findViewById(R.id.usbStatus)
 
-        // Show HTTP Stream instructions
+        // Show RTP video stream instructions for Mission Planner
         val statusText = findViewById<TextView>(R.id.status)
-        statusText.text = "Stream: http://100.112.147.84:8888/stream"
+        statusText.text = "Video: RTP/UDP -> 100.104.253.54:5600 (H.264)\nSDP: http://<IP_ТЕЛЕФОНА>:8888/sdp"
 
         setupSeekBars()
         registerReceiver(statsReceiver, IntentFilter(TelemetryBridgeService.STATS_UPDATE), RECEIVER_EXPORTED)

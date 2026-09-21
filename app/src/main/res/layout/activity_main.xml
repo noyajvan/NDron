@@ -23,7 +23,7 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_marginTop="10dp"
-        android:text="Stream: http://[IP]:8080/stream\nTelemetry: UDP 14550"
+        android:text="Video: RTP/UDP 5600 (H.264)\nSDP: http://[IP]:8888/sdp\nTelemetry: UDP 14550"
         app:layout_constraintTop_toBottomOf="@id/title"
         app:layout_constraintStart_toStartOf="parent" />
 
