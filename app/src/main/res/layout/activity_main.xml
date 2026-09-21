@@ -85,4 +85,14 @@
         app:layout_constraintTop_toBottomOf="@id/qualitySeekBar"
         app:layout_constraintStart_toStartOf="parent" />
 
+    <Button
+        android:id="@+id/openBrowserButton"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="20dp"
+        android:text="Відкрити стрім у браузері"
+        app:layout_constraintTop_toBottomOf="@id/usbStatus"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
 </androidx.constraintlayout.widget.ConstraintLayout>

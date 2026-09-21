@@ -34,9 +34,23 @@ class MjpegServer(port: Int) : NanoHTTPD(port) {
         }
         if (session.uri == "/" || session.uri == "/index.html") {
             val html = """
-                <html><body style="margin:0;background:#000">
-                <img src="/stream" style="width:100%;height:auto"/>
-                </body></html>
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <meta charset="utf-8">
+                    <meta name="viewport" content="width=device-width, initial-scale=1">
+                    <title>DRN Telemetry Bridge — MJPEG</title>
+                    <style>
+                        body { margin:0; background:#000; color:#eee; font-family:sans-serif; }
+                        header { padding:8px 12px; background:#111; font-size:14px; }
+                        img { display:block; width:100%; height:auto; }
+                    </style>
+                </head>
+                <body>
+                    <header>DRN Telemetry Bridge — MJPEG stream (/stream)</header>
+                    <img src="/stream" alt="MJPEG stream"/>
+                </body>
+                </html>
             """.trimIndent()
             return newFixedLengthResponse(Response.Status.OK, "text/html", html)
         }

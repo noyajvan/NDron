@@ -44,6 +44,17 @@ class MainActivity : AppCompatActivity() {
         // Показуємо реальну Tailscale IP телефону та URL для перегляду
         updateStatusText()
 
+        // Кнопка "Відкрити в браузері" — відкриває MJPEG-стрім у браузері на телефоні
+        findViewById<android.widget.Button>(R.id.openBrowserButton).setOnClickListener {
+            val ip = getTailscaleIp()
+            val url = "http://$ip:8888/"
+            try {
+                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+            } catch (e: Exception) {
+                usbStatus.text = "Не вдалося відкрити браузер: ${e.message}"
+            }
+        }
+
         setupSeekBars()
         ContextCompat.registerReceiver(
             this,
