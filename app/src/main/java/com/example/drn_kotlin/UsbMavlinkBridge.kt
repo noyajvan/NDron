@@ -55,9 +55,16 @@ class UsbMavlinkBridge(private val context: Context, private val gcsIp: String, 
         }
 
         // Thread 2: UDP -> USB (Optional, for commands from GCS)
+        // Слухаємо на окремому локальному порту, щоб не конфліктувати з GCS (gcsPort).
         executor.execute {
             val buffer = ByteArray(4096)
-            val socket = DatagramSocket(gcsPort) // Listen for packets back from GCS
+            val localPort = gcsPort + 1
+            val socket = try {
+                DatagramSocket(localPort)
+            } catch (e: Exception) {
+                Log.e(TAG, "Cannot bind UDP local port $localPort", e)
+                return@execute
+            }
             while (running) {
                 try {
                     val packet = DatagramPacket(buffer, buffer.size)
@@ -67,6 +74,7 @@ class UsbMavlinkBridge(private val context: Context, private val gcsIp: String, 
                     if (running) Log.e(TAG, "UDP to USB error", e)
                 }
             }
+            socket.close()
         }
         
         Log.d(TAG, "Bridge started")

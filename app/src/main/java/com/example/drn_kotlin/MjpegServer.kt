@@ -13,7 +13,7 @@ class MjpegServer(port: Int) : NanoHTTPD(port) {
     companion object {
         // Порт RTP-відео зарезервовано, але RTP не реалізовано.
         // Реальний потік — MJPEG на HTTP-порті, переданому в конструктор.
-        const val VIDEO_PORT = 5600
+        const val VIDEO_PORT = TelemetryBridgeService.VIDEO_UDP_PORT
     }
 
     fun updateFrame(jpegData: ByteArray) {
@@ -55,7 +55,6 @@ class MjpegServer(port: Int) : NanoHTTPD(port) {
             )
             response.addHeader("Cache-Control", "no-cache, private")
             response.addHeader("Pragma", "no-cache")
-            response.addHeader("Connection", "close")
             return response
         }
         return newFixedLengthResponse("Connect to /stream (MJPEG) or / (HTML viewer)")

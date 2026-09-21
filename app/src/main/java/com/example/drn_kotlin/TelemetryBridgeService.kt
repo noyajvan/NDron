@@ -59,8 +59,9 @@ class TelemetryBridgeService : LifecycleService() {
         const val EXTRA_FRAME_SIZE = "EXTRA_FRAME_SIZE"
         
         const val SERVER_PORT = 8888
-        const val GCS_IP = "100.104.253.54" 
+        const val GCS_IP = "100.104.253.54"
         const val MAVLINK_UDP_PORT = 14550
+        const val VIDEO_UDP_PORT = 5600
     }
 
     override fun onCreate() {
@@ -97,7 +98,7 @@ class TelemetryBridgeService : LifecycleService() {
                 mavlinkBridge?.stop()
                 mjpegServer?.stop()
                 releaseWakeLock()
-                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopForeground(android.app.Service.STOP_FOREGROUND_REMOVE)
                 stopSelf()
             }
             ACTION_SET_ZOOM -> {
@@ -215,6 +216,11 @@ class TelemetryBridgeService : LifecycleService() {
         releaseWakeLock()
         cameraExecutor.shutdown()
         super.onDestroy()
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        // Не даємо системі вбити сервіс при свайпі зі списку задач
+        super.onTaskRemoved(rootIntent)
     }
 
     private fun acquireWakeLock() {

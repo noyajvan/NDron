@@ -27,7 +27,7 @@ class MainActivity : AppCompatActivity() {
                 val size = intent.getIntExtra(TelemetryBridgeService.EXTRA_FRAME_SIZE, 0)
                 val kb = size / 1024
                 val kbps = (kb * 5 * 8) // Bitrate at 5 FPS
-                videoStats.text = "UDP TX: $kbps kbps | Frame: $kb KB"
+                videoStats.text = "MJPEG TX: $kbps kbps | Frame: $kb KB"
             }
         }
     }
@@ -119,7 +119,11 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        unregisterReceiver(statsReceiver)
+        try {
+            unregisterReceiver(statsReceiver)
+        } catch (e: IllegalArgumentException) {
+            // Ресивер не був зареєстрований — ігноруємо
+        }
     }
 
     override fun onNewIntent(intent: Intent) {

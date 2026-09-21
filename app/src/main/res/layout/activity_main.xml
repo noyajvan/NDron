@@ -23,7 +23,7 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_marginTop="10dp"
-        android:text="MJPEG: http://[IP]:8888/stream\nViewer: http://[IP]:8888/\nHealth: http://[IP]:8888/health\nTelemetry: UDP 14550"
+        android:text="MJPEG: http://[IP]:8888/stream\nViewer: http://[IP]:8888/\nHealth: http://[IP]:8888/health\nTelemetry: UDP 14550\nVLC: vlc http://[IP]:8888/stream"
         app:layout_constraintTop_toBottomOf="@id/title"
         app:layout_constraintStart_toStartOf="parent" />
 
@@ -32,7 +32,7 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_marginTop="5dp"
-        android:text="HTTP Stream: 0 kbps | Frame: 0 KB"
+        android:text="MJPEG TX: 0 kbps | Frame: 0 KB"
         android:textColor="#2196F3"
         app:layout_constraintTop_toBottomOf="@id/status"
         app:layout_constraintStart_toStartOf="parent" />
@@ -61,7 +61,7 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_marginTop="20dp"
-        android:text="Video Quality: 30%"
+        android:text="Video Quality: 40%"
         app:layout_constraintTop_toBottomOf="@id/zoomSeekBar"
         app:layout_constraintStart_toStartOf="parent" />
 
@@ -70,7 +70,7 @@
         android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:max="100"
-        android:progress="30"
+        android:progress="40"
         app:layout_constraintTop_toBottomOf="@id/qualityLabel"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
