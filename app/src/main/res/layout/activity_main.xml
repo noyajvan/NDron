@@ -76,13 +76,23 @@
         app:layout_constraintEnd_toEndOf="parent" />
 
     <TextView
-        android:id="@+id/usbStatus"
+        android:id="@+id/tailscaleStatus"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_marginTop="30dp"
-        android:text="USB FC: Searching..."
+        android:text="Tailscale: перевірка..."
         android:textColor="#FF9800"
         app:layout_constraintTop_toBottomOf="@id/qualitySeekBar"
+        app:layout_constraintStart_toStartOf="parent" />
+
+    <TextView
+        android:id="@+id/usbStatus"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:text="USB FC: Searching..."
+        android:textColor="#FF9800"
+        app:layout_constraintTop_toBottomOf="@id/tailscaleStatus"
         app:layout_constraintStart_toStartOf="parent" />
 
     <Button
@@ -92,6 +102,16 @@
         android:layout_marginTop="20dp"
         android:text="Відкрити стрім у браузері"
         app:layout_constraintTop_toBottomOf="@id/usbStatus"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <Button
+        android:id="@+id/stopButton"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:text="Зупинити сервіс"
+        app:layout_constraintTop_toBottomOf="@id/openBrowserButton"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
 

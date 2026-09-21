@@ -10,6 +10,11 @@ class MjpegServer(port: Int) : NanoHTTPD(port) {
     private val currentFrame = AtomicReference<ByteArray?>(null)
     private val TAG = "MjpegServer"
 
+    /**
+     * Провайдер статистики від сервісу. Встановлюється ззовні.
+     */
+    var healthProvider: (() -> HealthSnapshot)? = null
+
     companion object {
         // Порт RTP-відео зарезервовано, але RTP не реалізовано.
         // Реальний потік — MJPEG на HTTP-порті, переданому в конструктор.
@@ -56,7 +61,23 @@ class MjpegServer(port: Int) : NanoHTTPD(port) {
         }
         if (session.uri == "/health") {
             val frame = currentFrame.get()
-            val body = "ok\nframeBytes=${frame?.size ?: 0}\n"
+            val snapshot = healthProvider?.invoke()
+            val body = buildString {
+                append("ok\n")
+                append("frameBytes=${frame?.size ?: 0}\n")
+                if (snapshot != null) {
+                    append("uptimeMs=${snapshot.uptimeMs}\n")
+                    append("frameCount=${snapshot.frameCount}\n")
+                    append("fps=${String.format("%.1f", snapshot.fps)}\n")
+                    append("lastFrameBytes=${snapshot.lastFrameSize}\n")
+                    append("jpegQuality=${snapshot.jpegQuality}\n")
+                    append("zoom=${snapshot.zoom}\n")
+                    append("cameraStarted=${snapshot.cameraStarted}\n")
+                    append("mavlinkRunning=${snapshot.mavlinkRunning}\n")
+                    append("tailscaleUp=${snapshot.tailscaleUp}\n")
+                    append("addresses=${snapshot.addresses.joinToString(",")}\n")
+                }
+            }
             return newFixedLengthResponse(Response.Status.OK, "text/plain", body)
         }
         if (session.uri == "/stream") {

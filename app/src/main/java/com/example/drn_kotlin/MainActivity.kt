@@ -20,6 +20,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var qualityLabel: TextView
     private lateinit var videoStats: TextView
     private lateinit var usbStatus: TextView
+    private lateinit var tailscaleStatus: TextView
 
     private val statsReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -40,9 +41,20 @@ class MainActivity : AppCompatActivity() {
         qualityLabel = findViewById(R.id.qualityLabel)
         videoStats = findViewById(R.id.videoStats)
         usbStatus = findViewById(R.id.usbStatus)
+        tailscaleStatus = findViewById(R.id.tailscaleStatus)
 
         // Показуємо реальну Tailscale IP телефону та URL для перегляду
         updateStatusText()
+        updateTailscaleStatus()
+
+        // Кнопка "Стоп" — зупиняє сервіс
+        findViewById<android.widget.Button>(R.id.stopButton).setOnClickListener {
+            val intent = Intent(this, TelemetryBridgeService::class.java)
+                .setAction(TelemetryBridgeService.ACTION_STOP)
+            startService(intent)
+            usbStatus.text = "Сервіс зупинено"
+            usbStatus.setTextColor(0xFFFF9800.toInt())
+        }
 
         // Кнопка "Відкрити в браузері" — відкриває MJPEG-стрім у браузері на телефоні
         findViewById<android.widget.Button>(R.id.openBrowserButton).setOnClickListener {
@@ -78,8 +90,20 @@ class MainActivity : AppCompatActivity() {
         statusText.text = "MJPEG: http://$ip:8888/stream\n" +
             "Перегляд: http://$ip:8888/\n" +
             "Health: http://$ip:8888/health\n" +
-            "Telemetry: UDP 14550 -> 100.104.253.54\n" +
+            "Telemetry: UDP 14550 -> ${TelemetryBridgeService.DEFAULT_GCS_IP}\n" +
             "VLC: vlc http://$ip:8888/stream"
+    }
+
+    private fun updateTailscaleStatus() {
+        val up = NetworkUtils.isTailscaleUp()
+        val ip = NetworkUtils.findTailscaleIp() ?: "<немає>"
+        if (up) {
+            tailscaleStatus.text = "Tailscale: ПІДКЛЮЧЕНО ($ip)"
+            tailscaleStatus.setTextColor(0xFF4CAF50.toInt())
+        } else {
+            tailscaleStatus.text = "Tailscale: НЕ ПІДКЛЮЧЕНО (fallback $ip)"
+            tailscaleStatus.setTextColor(0xFFF44336.toInt())
+        }
     }
 
     private fun setupSeekBars() {
@@ -136,6 +160,7 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         // Оновлюємо IP при поверненні в застосунок (Tailscale міг піднятися пізніше)
         updateStatusText()
+        updateTailscaleStatus()
     }
 
     override fun onDestroy() {
@@ -200,23 +225,6 @@ class MainActivity : AppCompatActivity() {
      * Інакше — першу non-loopback IPv4 адресу.
      */
     private fun getTailscaleIp(): String {
-        try {
-            val interfaces = java.net.NetworkInterface.getNetworkInterfaces()
-            var fallback = "<IP_ТЕЛЕФОНА>"
-            for (nif in interfaces) {
-                if (!nif.isUp || nif.isLoopback) continue
-                for (addr in nif.inetAddresses) {
-                    if (addr is java.net.Inet4Address && !addr.isLoopbackAddress) {
-                        val host = addr.hostAddress ?: continue
-                        // Tailscale використовує діапазон 100.64.0.0/10 (CGNAT)
-                        if (host.startsWith("100.")) return host
-                        if (fallback == "<IP_ТЕЛЕФОНА>") fallback = host
-                    }
-                }
-            }
-            return fallback
-        } catch (e: Exception) {
-            return "<IP_ТЕЛЕФОНА>"
-        }
+        return NetworkUtils.findTailscaleIp() ?: "<IP_ТЕЛЕФОНА>"
     }
 }

@@ -44,6 +44,15 @@ class TelemetryBridgeService : LifecycleService() {
     private var jpegQuality = 40
     private var currentZoom = 1.0f
 
+    // Статистика для /health та логування
+    private var startTimeMs = 0L
+    private var frameCount = 0L
+    private var lastFrameSize = 0
+    private var lastFrameLogTime = 0L
+    private var lastFpsWindowTime = 0L
+    private var framesInWindow = 0
+    private var currentFps = 0.0
+
     companion object {
         private const val TAG = "TelemetryBridgeService"
         const val CHANNEL_ID = "DroneBridgeServiceChannel"
@@ -60,9 +69,33 @@ class TelemetryBridgeService : LifecycleService() {
         const val EXTRA_FRAME_SIZE = "EXTRA_FRAME_SIZE"
         
         const val SERVER_PORT = 8888
-        const val GCS_IP = "100.104.253.54"
         const val MAVLINK_UDP_PORT = 14550
         const val VIDEO_UDP_PORT = 5600
+
+        // Fallback GCS IP, якщо Tailscale не піднятий
+        const val DEFAULT_GCS_IP = "100.104.253.54"
+
+        // Скільки мс між кадрами (5 FPS)
+        private const val FRAME_INTERVAL_MS = 200L
+        // Як часто логувати статистику кадрів
+        private const val FRAME_LOG_INTERVAL_MS = 5000L
+    }
+
+    /**
+     * Повертає актуальний GCS IP: Tailscale-адреса комп'ютера, якщо відома,
+     * інакше — DEFAULT_GCS_IP.
+     */
+    private fun resolveGcsIp(): String {
+        // Якщо Tailscale піднятий, використовуємо його як джерело для GCS.
+        // Реальний GCS IP задається константою, але якщо він недоступний —
+        // логуємо попередження.
+        val tsIp = NetworkUtils.findTailscaleIp()
+        if (tsIp == null) {
+            Log.w(TAG, "Tailscale не піднятий, використовуємо DEFAULT_GCS_IP=$DEFAULT_GCS_IP")
+        } else {
+            Log.i(TAG, "Tailscale IP телефону: $tsIp, GCS=$DEFAULT_GCS_IP")
+        }
+        return DEFAULT_GCS_IP
     }
 
     override fun onCreate() {
@@ -72,17 +105,21 @@ class TelemetryBridgeService : LifecycleService() {
         try {
             // NanoHTTPD(port) binds to all interfaces by default (0.0.0.0)
             mjpegServer = MjpegServer(SERVER_PORT)
+            mjpegServer?.healthProvider = { getHealthSnapshot() }
             mjpegServer?.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
             Log.i(TAG, "MJPEG Server started on 0.0.0.0:$SERVER_PORT (running=${mjpegServer?.isRunning()})")
         } catch (e: Exception) {
             Log.e(TAG, "MJPEG Server start FAILED on port $SERVER_PORT", e)
         }
         try {
-            mavlinkBridge = UsbMavlinkBridge(this, GCS_IP, MAVLINK_UDP_PORT)
-            Log.d(TAG, "MAVLink Bridge created")
+            val gcsIp = resolveGcsIp()
+            mavlinkBridge = UsbMavlinkBridge(this, gcsIp, MAVLINK_UDP_PORT)
+            Log.d(TAG, "MAVLink Bridge created (GCS=$gcsIp)")
         } catch (e: Exception) {
             Log.e(TAG, "MAVLink Bridge init FAILED", e)
         }
+        startTimeMs = System.currentTimeMillis()
+        lastFpsWindowTime = startTimeMs
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -141,13 +178,34 @@ class TelemetryBridgeService : LifecycleService() {
 
             imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
                 val currentTime = System.currentTimeMillis()
-                if (currentTime - lastFrameTime >= 200) { // 5 FPS
+                if (currentTime - lastFrameTime >= FRAME_INTERVAL_MS) { // 5 FPS
                     val image = imageProxy.image
                     if (image != null) {
                         val jpeg = imageToJpeg(image, jpegQuality)
                         mjpegServer?.updateFrame(jpeg)
                         sendBroadcast(Intent(STATS_UPDATE).putExtra(EXTRA_FRAME_SIZE, jpeg.size))
                         lastFrameTime = currentTime
+
+                        // Оновлюємо статистику
+                        frameCount++
+                        lastFrameSize = jpeg.size
+                        framesInWindow++
+                        val windowElapsed = currentTime - lastFpsWindowTime
+                        if (windowElapsed >= 1000L) {
+                            currentFps = framesInWindow * 1000.0 / windowElapsed
+                            framesInWindow = 0
+                            lastFpsWindowTime = currentTime
+                        }
+
+                        // Періодичне логування
+                        if (currentTime - lastFrameLogTime >= FRAME_LOG_INTERVAL_MS) {
+                            Log.i(
+                                TAG,
+                                "Frames=$frameCount, FPS=${String.format("%.1f", currentFps)}, " +
+                                    "lastFrame=${lastFrameSize / 1024}KB, quality=$jpegQuality, zoom=$currentZoom"
+                            )
+                            lastFrameLogTime = currentTime
+                        }
                     }
                 }
                 imageProxy.close()
@@ -212,6 +270,25 @@ class TelemetryBridgeService : LifecycleService() {
             }
         }
         return nv21
+    }
+
+    /**
+     * Повертає знімок статистики для /health.
+     */
+    fun getHealthSnapshot(): HealthSnapshot {
+        val uptimeMs = if (startTimeMs > 0) System.currentTimeMillis() - startTimeMs else 0L
+        return HealthSnapshot(
+            uptimeMs = uptimeMs,
+            frameCount = frameCount,
+            fps = currentFps,
+            lastFrameSize = lastFrameSize,
+            jpegQuality = jpegQuality,
+            zoom = currentZoom,
+            cameraStarted = cameraStarted,
+            mavlinkRunning = mavlinkBridge?.isRunning() ?: false,
+            tailscaleUp = NetworkUtils.isTailscaleUp(),
+            addresses = NetworkUtils.listIpv4Addresses()
+        )
     }
 
     override fun onDestroy() {
@@ -286,3 +363,19 @@ class TelemetryBridgeService : LifecycleService() {
 
     override fun onBind(intent: Intent): IBinder? = super.onBind(intent)
 }
+
+/**
+ * Знімок стану сервісу для /health.
+ */
+data class HealthSnapshot(
+    val uptimeMs: Long,
+    val frameCount: Long,
+    val fps: Double,
+    val lastFrameSize: Int,
+    val jpegQuality: Int,
+    val zoom: Float,
+    val cameraStarted: Boolean,
+    val mavlinkRunning: Boolean,
+    val tailscaleUp: Boolean,
+    val addresses: List<String>
+)

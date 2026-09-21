@@ -80,6 +80,8 @@ class UsbMavlinkBridge(private val context: Context, private val gcsIp: String, 
         Log.d(TAG, "Bridge started")
     }
 
+    fun isRunning(): Boolean = running
+
     fun stop() {
         running = false
         try {
