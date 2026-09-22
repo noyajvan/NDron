@@ -15,6 +15,11 @@ class MjpegServer(port: Int) : NanoHTTPD(port) {
      */
     var healthProvider: (() -> HealthSnapshot)? = null
 
+    /**
+     * Провайдер SDP для H.264/RTP-стріму. Встановлюється ззовні.
+     */
+    var sdpProvider: (() -> String)? = null
+
     companion object {
         // Порт RTP-відео зарезервовано, але RTP не реалізовано.
         // Реальний потік — MJPEG на HTTP-порті, переданому в конструктор.
@@ -30,12 +35,13 @@ class MjpegServer(port: Int) : NanoHTTPD(port) {
     override fun serve(session: IHTTPSession): Response {
         Log.i(TAG, "New request from ${session.remoteIpAddress}: ${session.uri}")
         if (session.uri == "/sdp") {
-            // H.264/RTP-енкодер у цьому проекті НЕ реалізовано.
-            // Єдиний реальний потік — MJPEG на /stream (порт 8888).
-            // Повертаємо текстову підказку замість фальшивого SDP.
-            val body = "H.264/RTP not implemented.\n" +
-                "Use MJPEG stream: http://<IP>:8888/stream\n"
-            return newFixedLengthResponse(Response.Status.OK, "text/plain", body)
+            val sdp = sdpProvider?.invoke()
+            if (sdp.isNullOrEmpty()) {
+                val body = "H.264/RTP not started yet.\n" +
+                    "Use MJPEG stream: http://<IP>:8888/stream\n"
+                return newFixedLengthResponse(Response.Status.OK, "text/plain", body)
+            }
+            return newFixedLengthResponse(Response.Status.OK, "application/sdp", sdp)
         }
         if (session.uri == "/" || session.uri == "/index.html") {
             val html = """
@@ -74,6 +80,7 @@ class MjpegServer(port: Int) : NanoHTTPD(port) {
                     append("zoom=${snapshot.zoom}\n")
                     append("cameraStarted=${snapshot.cameraStarted}\n")
                     append("mavlinkRunning=${snapshot.mavlinkRunning}\n")
+                    append("h264Running=${snapshot.h264Running}\n")
                     append("tailscaleUp=${snapshot.tailscaleUp}\n")
                     append("addresses=${snapshot.addresses.joinToString(",")}\n")
                 }

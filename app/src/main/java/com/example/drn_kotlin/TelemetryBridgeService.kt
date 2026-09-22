@@ -38,6 +38,7 @@ class TelemetryBridgeService : LifecycleService() {
     private var lastFrameTime = 0L
     private var mjpegServer: MjpegServer? = null
     private var mavlinkBridge: UsbMavlinkBridge? = null
+    private var h264Streamer: H264RtpStreamer? = null
     private var camera: Camera? = null
     private var cameraStarted = false
 
@@ -71,6 +72,8 @@ class TelemetryBridgeService : LifecycleService() {
         const val SERVER_PORT = 8888
         const val MAVLINK_UDP_PORT = 14550
         const val VIDEO_UDP_PORT = 5600
+        // Порт RTP-відео для Mission Planner (GStreamer)
+        const val VIDEO_RTP_PORT = 5600
 
         // Fallback GCS IP, якщо Tailscale не піднятий
         const val DEFAULT_GCS_IP = "100.104.253.54"
@@ -106,6 +109,7 @@ class TelemetryBridgeService : LifecycleService() {
             // NanoHTTPD(port) binds to all interfaces by default (0.0.0.0)
             mjpegServer = MjpegServer(SERVER_PORT)
             mjpegServer?.healthProvider = { getHealthSnapshot() }
+            mjpegServer?.sdpProvider = { h264Streamer?.buildSdp() ?: "" }
             mjpegServer?.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
             Log.i(TAG, "MJPEG Server started on 0.0.0.0:$SERVER_PORT (running=${mjpegServer?.isRunning()})")
         } catch (e: Exception) {
@@ -134,9 +138,12 @@ class TelemetryBridgeService : LifecycleService() {
                     startCamera()
                 }
                 mavlinkBridge?.start()
+                startH264Streamer()
             }
             ACTION_STOP -> {
                 mavlinkBridge?.stop()
+                h264Streamer?.stop()
+                h264Streamer = null
                 mjpegServer?.stop()
                 releaseWakeLock()
                 stopForeground(android.app.Service.STOP_FOREGROUND_REMOVE)
@@ -157,6 +164,20 @@ class TelemetryBridgeService : LifecycleService() {
     private fun setZoom(zoom: Float) {
         currentZoom = zoom
         camera?.cameraControl?.setZoomRatio(zoom)
+    }
+
+    private fun startH264Streamer() {
+        if (h264Streamer?.isRunning() == true) return
+        val gcsIp = resolveGcsIp()
+        h264Streamer = H264RtpStreamer(
+            gcsIp = gcsIp,
+            gcsPort = VIDEO_RTP_PORT,
+            width = 640,
+            height = 480,
+            fps = 15,
+            bitrate = 1_500_000
+        ).also { it.start() }
+        Log.i(TAG, "H.264/RTP streamer -> $gcsIp:$VIDEO_RTP_PORT")
     }
 
     @androidx.annotation.OptIn(ExperimentalCamera2Interop::class)
@@ -286,6 +307,7 @@ class TelemetryBridgeService : LifecycleService() {
             zoom = currentZoom,
             cameraStarted = cameraStarted,
             mavlinkRunning = mavlinkBridge?.isRunning() ?: false,
+            h264Running = h264Streamer?.isRunning() ?: false,
             tailscaleUp = NetworkUtils.isTailscaleUp(),
             addresses = NetworkUtils.listIpv4Addresses()
         )
@@ -294,6 +316,8 @@ class TelemetryBridgeService : LifecycleService() {
     override fun onDestroy() {
         cameraStarted = false
         mavlinkBridge?.stop()
+        h264Streamer?.stop()
+        h264Streamer = null
         mjpegServer?.stop()
         releaseWakeLock()
         cameraExecutor.shutdown()
@@ -376,6 +400,7 @@ data class HealthSnapshot(
     val zoom: Float,
     val cameraStarted: Boolean,
     val mavlinkRunning: Boolean,
+    val h264Running: Boolean,
     val tailscaleUp: Boolean,
     val addresses: List<String>
 )

@@ -90,6 +90,7 @@ class MainActivity : AppCompatActivity() {
         statusText.text = "MJPEG: http://$ip:8888/stream\n" +
             "Перегляд: http://$ip:8888/\n" +
             "Health: http://$ip:8888/health\n" +
+            "SDP (H.264/RTP): http://$ip:8888/sdp\n" +
             "Telemetry: UDP 14550 -> ${TelemetryBridgeService.DEFAULT_GCS_IP}\n" +
             "VLC: vlc http://$ip:8888/stream"
     }
