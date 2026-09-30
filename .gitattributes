@@ -1,0 +1,12 @@
+# Нормалізація кінців рядків.
+# .md/.sh/.py/.service — LF обов'язково (frontmatter .kilo/ ламається від CRLF).
+# bat/ps1 — CRLF (Windows-скрипти).
+* text=auto
+
+*.md       text eol=lf
+*.sh       text eol=lf
+*.py       text eol=lf
+*.service  text eol=lf
+
+*.bat      text eol=crlf
+*.ps1      text eol=crlf
