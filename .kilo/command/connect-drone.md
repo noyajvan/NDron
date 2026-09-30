@@ -5,6 +5,10 @@ agent: code
 
 Подключи Mission Planner к дрону через телефон (WiFi hotspot) + Tailscale.
 
+> ВАЖНО: ниже — устаревший вариант через Tailscale. Актуальная архитектура:
+> ESP32 -> Oracle VPS (вихідний TCP :14553) -> реле -> Mission Planner (TCP :14552).
+> Прошивка: `firmware/`, реле: `firmware/scripts/udp_relay_vps.py`.
+
 ## Новая архитектура
 
 `
@@ -32,7 +36,7 @@ socat UDP-RECVFROM:14550,reuseaddr,fork UDP-SENDTO:100.104.253.54:14550
 
 ### 3. На ПК — запустить Mission Planner
 `powershell
-.\scripts\mp_connect.ps1
+.\firmware\scripts\mp_connect.ps1
 `
 
 ### 4. Команды ПК -> ESP32
