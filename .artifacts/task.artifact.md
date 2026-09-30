@@ -1,0 +1,4 @@
+- [ ] Implement H.264 hardware streaming integration and traffic tracking in TelemetryBridgeService
+- [ ] Update MainActivity to display real-time traffic per minute and Oracle Cloud usage
+- [ ] Update MjpegServer dashboard with Oracle traffic metrics
+- [ ] Build and verify project with gradle_build

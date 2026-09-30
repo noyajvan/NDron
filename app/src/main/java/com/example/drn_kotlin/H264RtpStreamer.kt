@@ -3,6 +3,7 @@ package com.example.drn_kotlin
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
+import android.util.Base64
 import android.util.Log
 import java.net.DatagramPacket
 import java.net.DatagramSocket
@@ -23,8 +24,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 class H264RtpStreamer(
     private val gcsIp: String,
     private val gcsPort: Int,
-    private val width: Int = 640,
-    private val height: Int = 480,
+    private var width: Int = 640,
+    private var height: Int = 480,
     private val fps: Int = 15,
     private val bitrate: Int = 1_500_000
 ) {
@@ -38,7 +39,6 @@ class H264RtpStreamer(
     private var ssrc = 0
     private var seq = 0
     private var timestamp = 0L
-    private val frameIntervalUs = 1_000_000L / fps
 
     // SPS/PPS, отримані з codec output (для SDP та для повторної відправки)
     @Volatile private var sps: ByteArray? = null
@@ -46,13 +46,32 @@ class H264RtpStreamer(
 
     fun isRunning(): Boolean = running.get()
 
+    fun ensureConfigured(frameWidth: Int, frameHeight: Int) {
+        if (!running.get()) return
+        if (width != frameWidth || height != frameHeight || codec == null) {
+            Log.i(TAG, "Reconfiguring H264 encoder to ${frameWidth}x${frameHeight}")
+            stopCodec()
+            width = frameWidth
+            height = frameHeight
+            startCodec()
+        }
+    }
+
     fun start() {
         if (running.getAndSet(true)) return
         try {
             target = InetAddress.getByName(gcsIp)
             socket = DatagramSocket()
             ssrc = (Math.random() * Int.MAX_VALUE).toInt()
+            startCodec()
+        } catch (e: Exception) {
+            Log.e(TAG, "start failed", e)
+            running.set(false)
+        }
+    }
 
+    private fun startCodec() {
+        try {
             val format = MediaFormat.createVideoFormat(MIME, width, height).apply {
                 setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
                 setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
@@ -64,25 +83,28 @@ class H264RtpStreamer(
             c.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             c.start()
             codec = c
-            Log.i(TAG, "H.264 encoder started ${width}x$height@$fps, bitrate=$bitrate, -> $gcsIp:$gcsPort")
+            Log.i(TAG, "H.264 encoder started ${width}x$height@$fps, bitrate=$bitrate -> $gcsIp:$gcsPort")
         } catch (e: Exception) {
-            Log.e(TAG, "start failed", e)
-            running.set(false)
+            Log.e(TAG, "startCodec failed", e)
         }
+    }
+
+    private fun stopCodec() {
+        try { codec?.stop() } catch (_: Exception) {}
+        try { codec?.release() } catch (_: Exception) {}
+        codec = null
     }
 
     fun stop() {
         if (!running.getAndSet(false)) return
-        try { codec?.stop() } catch (_: Exception) {}
-        try { codec?.release() } catch (_: Exception) {}
-        codec = null
+        stopCodec()
         try { socket?.close() } catch (_: Exception) {}
         socket = null
         Log.i(TAG, "H.264 encoder stopped")
     }
 
     /**
-     * Подає один YUV420-кадр (I420: Y + U + V) у енкодер.
+     * Подає один YUV420-кадр у енкодер.
      * Викликати з фонового потоку.
      */
     fun pushFrame(i420: ByteArray, ptsUs: Long) {
@@ -93,8 +115,9 @@ class H264RtpStreamer(
             if (inIndex >= 0) {
                 val buf = c.getInputBuffer(inIndex) ?: return
                 buf.clear()
-                buf.put(i420)
-                c.queueInputBuffer(inIndex, 0, i420.size, ptsUs, 0)
+                val bytesToCopy = minOf(i420.size, buf.remaining())
+                buf.put(i420, 0, bytesToCopy)
+                c.queueInputBuffer(inIndex, 0, bytesToCopy, ptsUs, 0)
             }
             drainOutput()
         } catch (e: Exception) {
@@ -118,11 +141,25 @@ class H264RtpStreamer(
             if (outIndex < 0) continue
             val buf = c.getOutputBuffer(outIndex) ?: continue
             if (info.size > 0 && (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0) {
-                val nal = ByteArray(info.size)
+                var nal = ByteArray(info.size)
                 buf.position(info.offset)
                 buf.limit(info.offset + info.size)
                 buf.get(nal)
-                sendNalAsRtp(nal, info.presentationTimeUs)
+
+                // Strip Annex B start codes (0x00000001 or 0x000001) for RFC 6184 RTP
+                var nalStart = 0
+                if (nal.size >= 4 && nal[0] == 0.toByte() && nal[1] == 0.toByte() && nal[2] == 0.toByte() && nal[3] == 1.toByte()) {
+                    nalStart = 4
+                } else if (nal.size >= 3 && nal[0] == 0.toByte() && nal[1] == 0.toByte() && nal[2] == 1.toByte()) {
+                    nalStart = 3
+                }
+                if (nalStart > 0) {
+                    nal = nal.copyOfRange(nalStart, nal.size)
+                }
+
+                if (nal.isNotEmpty()) {
+                    sendNalAsRtp(nal, info.presentationTimeUs)
+                }
             }
             c.releaseOutputBuffer(outIndex, false)
         }
@@ -131,7 +168,7 @@ class H264RtpStreamer(
     private fun sendNalAsRtp(nal: ByteArray, ptsUs: Long) {
         val s = socket ?: return
         val t = target ?: return
-        timestamp = (ptsUs * 90 / 1000).toInt() // 90 kHz clock
+        timestamp = ptsUs * 90 / 1000L // 90 kHz clock
 
         val maxPayload = 1400
         if (nal.size <= maxPayload) {
@@ -190,8 +227,8 @@ class H264RtpStreamer(
     fun buildSdp(): String {
         val s = sps
         val p = pps
-        val spsB64 = if (s != null) android.util.Base64.encodeToString(s, android.util.Base64.NO_WRAP) else ""
-        val ppsB64 = if (p != null) android.util.Base64.encodeToString(p, android.util.Base64.NO_WRAP) else ""
+        val spsB64 = if (s != null) Base64.encodeToString(s, Base64.NO_WRAP) else ""
+        val ppsB64 = if (p != null) Base64.encodeToString(p, Base64.NO_WRAP) else ""
         return buildString {
             append("v=0\r\n")
             append("o=- 0 0 IN IP4 0.0.0.0\r\n")
