@@ -1,0 +1,461 @@
+#include <math.h>
+#include "fsm_types.h"
+#include "state_machine.h"
+#include "mavlink_util.h"
+#include "wifi_mgr.h"
+
+extern bool crash_triggered;
+uint8_t last_cal_pct = 0;
+bool flew_above_1m = false;
+float mission_base_alt = 0.0f;
+static unsigned long land_stop_ms = 0;
+static unsigned long tip_bounce_ms = 0;
+static unsigned long cal_pct_ms = 0;
+static bool cal_accept_sent = false;
+
+void updateSystemState() {
+  unsigned long now = millis();
+
+  hasWifi = wifiOn && (WiFi.status() == WL_CONNECTED);
+
+  static unsigned long wifi_timeout_chk_ms = 0;
+  if (!staWasConnected && wifiOn && (now - wifi_timeout_chk_ms > WIFI_TIMEOUT_MS)) {
+    wifi_timeout_chk_ms = now;
+    wifiFullRestart();
+  }
+
+  if (current_custom_mode != MODE_STABILIZE && current_custom_mode != MODE_AUTO) {
+    if (mdfly != 60) {
+      mdfly = 60;
+      queue_statustext("mode != STAB/AUTO -> stop");
+      send_statustext_udp("Bridge: mode != STAB/AUTO -> stop");
+    }
+  }
+  if (mdfly == 60) return;
+
+  if (heartbeat_received && !missionFirstParsed) {
+    if (lastMissionReq == 0 && now - start_time > 2000) {
+        mission_count = 0;
+        mission_loaded = false;
+        mission_has_land = false;
+        send_mission_request_list();
+        lastMissionReq = now;
+      } else if (lastMissionReq && now - lastMissionReq > 5000) {
+      missionFirstParsed = true;
+      lastMissionReq = 0;
+      if (mission_count > 0) mission_loaded = true;
+    }
+  }
+
+  static SystemState lastState = STATE_INIT_WIFI;
+  if (state != lastState) {
+    state_entry_ms = now;
+    crash_triggered = false;
+    Serial.printf("[S] %d->%d\n", lastState, state);
+
+    switch (state) {
+      case STATE_MAG_ERROR:
+        mag_error_msg_sent = false;
+        rot_snap_roll  = roll_deg;
+        rot_snap_pitch = pitch_deg;
+        rot_detected = false;
+        send_statustext_udp("Bridge: MAG_ERROR");
+        Serial.printf("--> MAG_ERROR snap R=%.1f P=%.1f, mag=%.3f\n", roll_deg, pitch_deg, mag_test_ratio);
+        break;
+      case STATE_MAG_OK:
+        mag_ok_msg_sent = false;
+        rot_snap_roll  = roll_deg;
+        rot_snap_pitch = pitch_deg;
+        rot_detected = false;
+        send_statustext_udp("Bridge: MAG_OK");
+        Serial.printf("--> MAG_OK snap R=%.1f P=%.1f, mag=%.3f\n", roll_deg, pitch_deg, mag_test_ratio);
+        break;
+      case STATE_CALIBRATION:
+        cal_cmd_sent = false;
+        cal_success = false;
+        cal_completion_pct = 0;
+        cal_fitness = 0.0f;
+        last_cal_pct = 0;
+        cal_retries = 0;
+        cal_dia_reported = false;
+        cal_accept_sent = false;
+        cal_fc_failed = false;
+        cal_pct_ms = state_entry_ms;
+        send_statustext_udp("Bridge: compass calibration");
+        break;
+      case STATE_CALIBRATION_END:
+        cal_finalized = false;
+        break;
+      case STATE_NO_ARM:
+        no_arm_init = false;
+        break;
+      case STATE_ARMING:
+        break;
+      case STATE_START_MISSION:
+        mode_cmd_sent = false;
+        last_mode_retry_ms = 0;
+        break;
+      case STATE_MISSION:
+        mission_start_msg = false;
+        flew_above_1m = false;
+        land_stop_ms = 0;
+        tip_bounce_ms = 0;
+        // База висоти ще не зафіксована: чекаємо перший валідний VFR_HUD.
+        mission_base_alt = -1.0f;
+        break;
+      case STATE_RELAY_CONTROL:
+        break;
+      default:
+        break;
+    }
+    lastState = state;
+  }
+
+  switch (state) {
+
+    case STATE_INIT_WIFI: {
+      if (state_entry_ms == 0) state_entry_ms = now;
+      if (now - state_entry_ms > 2000) {
+        Serial.println("[S] INIT_WIFI -> INIT_MAVLINK");
+        state = STATE_INIT_MAVLINK;
+      } else {
+        static unsigned long last_log_wifi = 0;
+        if (now - last_log_wifi > 1000) { last_log_wifi = now; Serial.println("[S] waiting INIT_WIFI 2s"); }
+      }
+      break;
+    }
+
+    case STATE_INIT_MAVLINK: {
+      if (!heartbeat_received) {
+        static unsigned long last_log_hb = 0;
+        if (now - last_log_hb > 2000) { last_log_hb = now; Serial.println("[S] waiting heartbeat..."); }
+        break;
+      }
+      if (!ekf_report_received) {
+        static unsigned long last_log_ekf = 0;
+        if (now - last_log_ekf > 2000) { last_log_ekf = now; Serial.println("[S] waiting EKF report..."); }
+        break;
+      }
+
+      bool ekf_ok = ((ekf_flags & EKF_ATTITUDE) != 0);
+
+      static bool ekf_ok_prev = false;
+      static unsigned long ekf_att_stable_ms = 0;
+      static bool ekf_queued = false;
+      if (ekf_ok != ekf_ok_prev) {
+        ekf_ok_prev = ekf_ok;
+        if (ekf_ok) {
+          ekf_att_stable_ms = now;
+          ekf_queued = false;
+        }
+        Serial.printf("[EKF] flags=0x%04X att=%d mag=%.3f\n",
+                       ekf_flags, ekf_ok, mag_test_ratio);
+      }
+      if (ekf_ok && !ekf_queued && now - ekf_att_stable_ms > 3000) {
+        ekf_queued = true;
+        send_statustext_udp("Bridge: EKF OK");
+      }
+
+      if (!ekf_ok) {
+        // Таймаут: якщо EKF_ATTITUDE не піднявся за 30 секунд — продовжуємо
+        static unsigned long ekf_timeout_log = 0;
+        if (now - state_entry_ms > 30000) {
+          if (now - ekf_timeout_log > 5000) {
+            ekf_timeout_log = now;
+            Serial.printf("[S] EKF_ATT timeout %lu s, forcing MAG_OK\n", (now - state_entry_ms) / 1000);
+            send_statustext_udp("Bridge: EKF att timeout, skip mag check");
+          }
+          if (now - state_entry_ms > 35000) {
+            state = STATE_MAG_OK;
+            break;
+          }
+        }
+        break;
+      }
+      if (now - ekf_att_stable_ms < 5000) break;
+
+      // Сине вікно калібрування (MAG_OK) відкриваємо лише коли FC готова:
+      // магнітометр healthy (SYS_STATUS) і політник працює >= 20 с.
+      // Раніше обертання під час старту FC давало сміття (cal FAILED fit~22).
+      // Форс-перехід через 60 с після стабілізації EKF, щоб не блокувати політ.
+      bool fc_init_done = mag_sensor_ready &&
+                          fc_hb_first_ms != 0 &&
+                          (now - fc_hb_first_ms) > 20000;
+      if (!fc_init_done) {
+        static unsigned long init_wait_log = 0;
+        if ((now - ekf_att_stable_ms) > 60000) {
+          Serial.println("[S] FC init timeout, forcing MAG_OK");
+          state = STATE_MAG_OK;
+          break;
+        }
+        if (now - init_wait_log > 5000) {
+          init_wait_log = now;
+          Serial.println("[S] waiting FC init (mag/SYS_STATUS)");
+          queue_statustext("wait FC init");
+        }
+        break;
+      }
+
+      state = STATE_MAG_OK;
+      Serial.println("[S] EKF_ATT OK -> MAG_OK");
+      break;
+    }
+
+    case STATE_MAG_ERROR: {
+      if (!mag_error_msg_sent) {
+        char buf[72];
+        snprintf(buf, sizeof(buf), "mag=%.3f -> calibrating", mag_test_ratio);
+        queue_statustext(buf);
+        send_statustext_udp(buf);
+        send_statustext(buf);
+        mag_error_msg_sent = true;
+      }
+      state = STATE_CALIBRATION;
+      break;
+    }
+
+    case STATE_MAG_OK: {
+      if (!mag_ok_msg_sent) {
+        char buf[72];
+        snprintf(buf, sizeof(buf), "mag=%.3f waiting rotation", mag_test_ratio);
+        queue_statustext(buf);
+        send_statustext_udp(buf);
+        send_statustext(buf);
+        mag_ok_msg_sent = true;
+      }
+
+      if (fabs(roll_deg - rot_snap_roll) > 45.0f ||
+          fabs(pitch_deg - rot_snap_pitch) > 45.0f) {
+        rot_detected = true;
+        send_statustext_udp("Bridge: rotation detected");
+        Serial.printf("[ROT] MAG_OK dR=%.1f dP=%.1f!\n",
+                      roll_deg - rot_snap_roll, pitch_deg - rot_snap_pitch);
+      }
+
+      if (rot_detected) {
+        state = STATE_CALIBRATION;
+        break;
+      }
+
+      if (now - state_entry_ms > 20000) {
+        send_statustext_udp("Bridge: no rotation, skip calibration");
+        state = STATE_NO_ARM;
+      }
+      break;
+    }
+
+    case STATE_CALIBRATION: {
+      if (!cal_cmd_sent) {
+        sendStartMagCal();
+        send_statustext_udp("Bridge: calibration started");
+        cal_cmd_sent = true;
+        last_cal_pct = 0;
+        cal_accept_sent = false;
+        cal_fc_failed = false;
+        cal_pct_ms = state_entry_ms;
+        Serial.println("[CAL] command sent, waiting progress...");
+      }
+      if (cal_completion_pct != last_cal_pct) {
+        if (cal_completion_pct == 100 ||
+            cal_completion_pct > last_cal_pct + 5 ||
+            cal_completion_pct < last_cal_pct) {
+          char buf[50];
+          snprintf(buf, sizeof(buf), "Cal: %d%%",
+                   cal_completion_pct);
+          queue_statustext(buf);
+          Serial.printf("[CAL] progress %d%%\n",
+                        cal_completion_pct);
+        }
+        last_cal_pct = cal_completion_pct;
+        cal_pct_ms = now;
+      }
+      if (cal_success) {
+        bool dia_ok = cal_dia_x != 0.0f &&
+                      fabs(1.0f - cal_dia_x) <= DIA_TOLERANCE &&
+                      fabs(1.0f - cal_dia_y) <= DIA_TOLERANCE &&
+                      fabs(1.0f - cal_dia_z) <= DIA_TOLERANCE;
+        if (!dia_ok) {
+          // REPORT прийшов, але DIA поза допуском (0.85-1.15) — це сміттєві
+          // дані (наводки/кривий збір). Не зараховуємо: повторюємо спробу.
+          Serial.println("[CAL] SUCCESS but DIA bad -> retry");
+          queue_statustext("DIA bad - auto retry");
+          cal_success = false;
+          cal_fc_failed = true;   // активує retry/give-up нижче
+        } else {
+          state = STATE_CALIBRATION_END;
+          Serial.println("[CAL] SUCCESS -> CALIBRATION_END");
+        }
+      }
+
+      // Анти-зависання на 95-99%: дані майже зібрані, але FC не фіналізує
+      // (шум/наводки). Примусово приймаємо поточний набір — не частіше ніж
+      // раз на спробу і тільки коли прогрес зупинився на ~95+.
+      unsigned long cal_elapsed = now - state_entry_ms;
+      bool progress_stalled = cal_pct_ms != 0 && (now - cal_pct_ms) > 8000;
+      if (!cal_success && cal_cmd_sent && cal_completion_pct >= 95 &&
+          !cal_accept_sent && progress_stalled && cal_elapsed > 15000) {
+        sendAcceptMagCal();
+        cal_accept_sent = true;
+        queue_statustext("Cal 95%+, accepting");
+        Serial.println("[CAL] near-done, sending ACCEPT");
+      }
+
+      // Таймаут спроби: немає прогресу 8 с, жорсткий ліміт 60 с,
+      // або FC сама повідомила FAILED (cal_fc_failed).
+      bool fc_failed = cal_fc_failed;
+      cal_fc_failed = false;
+      bool attempt_timeout = (!cal_success && cal_cmd_sent &&
+                              cal_elapsed > 60000) ||
+                             (progress_stalled && cal_elapsed > 10000);
+      if (attempt_timeout || (fc_failed && cal_elapsed > 5000)) {
+        cal_retries++;
+        if (cal_retries < CAL_MAX_RETRIES) {
+          Serial.printf("[CAL] timeout, retry %d/%d\n", cal_retries, CAL_MAX_RETRIES);
+          cal_cmd_sent = false;
+          cal_success = false;
+          state_entry_ms = now;
+          cal_accept_sent = false;
+          cal_pct_ms = now;
+          last_cal_pct = 0;
+          send_statustext_udp("Bridge: calibration retry");
+        } else {
+          // Калібрування почалося по нахилу — після невдачі НЕ переходимо в
+          // політний цикл: тільки power-cycle дозволяє ARM (mdfly=60).
+          Serial.println("[CAL] max retries, power cycle required");
+          send_statustext_udp("Bridge: calibration failed, power cycle");
+          queue_statustext("Cal failed - power cycle FC");
+          mdfly = 60;
+          state = STATE_NO_ARM;
+        }
+      }
+      break;
+    }
+
+    case STATE_CALIBRATION_END: {
+      if (!cal_finalized) {
+        sendAcceptMagCal();
+        sendPreflightStorage();
+        queue_statustext("calibration OK - power cycle FC");
+        send_statustext_udp("Bridge: calibration OK - power cycle FC");
+        mdfly = 60;
+        cal_finalized = true;
+      }
+      break;
+    }
+
+    case STATE_NO_ARM: {
+      // Калібрування компаса запускається ТІЛЬКИ по перевороту в синьому
+      // вікні STATE_MAG_OK (20 с після MAG_OK). Раніше тут був тригер
+      // mag_test_ratio>0.5 — він запускав калібрування в будь-який момент
+      // (напр. при перевороті у жовтому стані) і зациклював її.
+
+      if (!no_arm_init) {
+        mission_loaded = false;
+        mission_has_land = false;
+        send_mission_request_list();
+        no_arm_init = true;
+      }
+
+      if (gps_fix_type >= 3 && now - state_entry_ms >= 5000) {
+        sendMavlinkArm();
+        queue_statustext("ARM >>");
+        state_entry_ms = now;
+      }
+
+      if (is_armed) {
+        state = STATE_ARMING;
+      }
+      break;
+    }
+
+    case STATE_ARMING: {
+      if (!is_armed) {
+        queue_statustext("disarmed -> NO_ARM");
+        state = STATE_NO_ARM;
+        break;
+      }
+
+      // AUTO шлем при ARMED + GPS fix + EKF-позиция. Флаги mission_loaded/
+      // missionFirstParsed убраны: миссию знает FC, мосту они не нужны.
+      bool can_auto = gps_fix_type >= 3 && (ekf_flags & EKF_POS_HORIZ_ABS);
+      if (can_auto) {
+        static bool auto_sent = false;
+        if (!auto_sent || (now - state_entry_ms >= 20000)) {
+          sendMavlinkSetMode(MODE_AUTO);
+          queue_statustext("AUTO >>");
+          auto_sent = true;
+          state_entry_ms = now;
+        }
+      }
+
+      if (is_armed && current_custom_mode == MODE_AUTO) {
+        state = STATE_MISSION;
+      }
+      break;
+    }
+
+    case STATE_MISSION: {
+      if (!mission_start_msg) {
+        queue_statustext("START");
+        mission_start_msg = true;
+      }
+      // Фіксуємо базову висоту при першому валідному VFR_HUD,
+      // щоб не вважати AMSL-висоту поля (напр. 57 м) за взліт.
+      if (mission_base_alt < 0.0f && vfr_alt > 0.5f) {
+        mission_base_alt = vfr_alt;
+      }
+      if (mission_base_alt >= 0.0f && vfr_alt - mission_base_alt > 1.0f) {
+        flew_above_1m = true;
+      }
+
+      // LAND: команда NAV_LAND у місії або режим LAND.
+      bool in_land = mission_has_land || (current_custom_mode == MODE_LAND);
+
+      // "Сів і стоїть": ArduPilot підтверджує ON_GROUND (не ширяє в повітрі).
+      // Тримаємо 5 с, щоб підтвердити, що дрон не підлетів угору.
+      if (in_land && landed_state == MAV_LANDED_STATE_ON_GROUND) {
+        if (land_stop_ms == 0) land_stop_ms = now;
+      } else {
+        land_stop_ms = 0;
+      }
+      bool landed_stopped = flew_above_1m && in_land &&
+                            land_stop_ms != 0 && (now - land_stop_ms > 5000);
+
+      // "Відскок" на нерівній поверхні (може бути сітка, дах, дерево):
+      // нахил >30° і контактер намагається вирівнятись і знову злетіти
+      // (climb > 0.5). Не плутати з ширянням при зносі вітром:
+      // там climb ≈ 0 і нахил не сягає 30°, тому умова не спрацює.
+      bool tipped = (fabsf(roll_deg) > 30.0f) || (fabsf(pitch_deg) > 30.0f);
+      bool bounce_attempt = tipped && (vfr_climb > 0.5f);
+      if (bounce_attempt) {
+        if (tip_bounce_ms == 0) tip_bounce_ms = now;
+      } else {
+        tip_bounce_ms = 0;
+      }
+      bool tipped_bounce = flew_above_1m && in_land &&
+                           tip_bounce_ms != 0 && (now - tip_bounce_ms > 400);
+
+      bool mission_ended = !is_armed;
+
+      if (mission_ended || landed_stopped || tipped_bounce || crash_triggered) {
+        if (flew_above_1m) {
+          sendMavlinkSetRelay();
+          sendMavlinkForceDisarm();
+          queue_statustext("Relay");
+        } else {
+          sendMavlinkForceDisarm();
+          queue_statustext("Disarmed, no relay");
+        }
+        state = STATE_RELAY_CONTROL;
+      }
+      break;
+    }
+
+    case STATE_RELAY_CONTROL: {
+      break;
+    }
+
+    default:
+      break;
+  }
+}
