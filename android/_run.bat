@@ -1,6 +1,9 @@
 @echo off
 setlocal
 
+rem adb з Android SDK (інакше не знаходиться в PATH)
+if exist "%LOCALAPPDATA%\Android\Sdk\platform-tools" set "PATH=%LOCALAPPDATA%\Android\Sdk\platform-tools;%PATH%"
+
 echo === Building and installing debug APK ===
 call gradlew.bat :app:installDebug
 if errorlevel 1 (

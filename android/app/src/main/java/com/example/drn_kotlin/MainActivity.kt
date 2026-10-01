@@ -13,29 +13,31 @@ import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
 import android.provider.Settings
+import android.view.KeyEvent
+import android.view.View
 import android.view.WindowManager
 import android.widget.Button
-import android.widget.SeekBar
 import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.view.PreviewView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import java.util.concurrent.Executors
 
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var zoomLabel: TextView
-    private lateinit var qualityLabel: TextView
-    private lateinit var resLabel: TextView
-    private lateinit var fpsLabel: TextView
     private lateinit var videoStats: TextView
     private lateinit var tailscaleStatus: TextView
     private lateinit var statusText: TextView
+    private lateinit var ecoOverlay: View
     private lateinit var viewFinder: PreviewView
-    private lateinit var dimScreenButton: Button
 
-    private var isDimmed = false
+    private var isEco = false
+    private var serviceRunning = true
 
     private val bgExecutor = Executors.newSingleThreadExecutor()
     private val handler = Handler(Looper.getMainLooper())
@@ -49,14 +51,29 @@ class MainActivity : AppCompatActivity() {
     private val statsReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action == TelemetryBridgeService.STATS_UPDATE) {
+                if (!serviceRunning) {
+                    serviceRunning = true
+                    findViewById<Button>(R.id.stopButton)?.text = "Зупинити сервіс"
+                }
                 val size = intent.getIntExtra(TelemetryBridgeService.EXTRA_FRAME_SIZE, 0)
                 val kb = size / 1024
-                val trafficMbMin = intent.getDoubleExtra(TelemetryBridgeService.EXTRA_TRAFFIC_MB_MIN, 0.0)
-                val sessionMb = intent.getDoubleExtra(TelemetryBridgeService.EXTRA_SESSION_MB, 0.0)
-                val oraclePercent = intent.getDoubleExtra(TelemetryBridgeService.EXTRA_ORACLE_PERCENT, 0.0)
-                
-                videoStats.text = String.format("Frame: %d KB | TX: %.1f MB/min (Tot: %.1f MB)\nOracle Free: %.4f%% of 10TB", 
-                    kb, trafficMbMin, sessionMb, oraclePercent)
+                val fps = intent.getDoubleExtra(TelemetryBridgeService.EXTRA_STREAM_FPS, 0.0)
+                val kbps = intent.getDoubleExtra(TelemetryBridgeService.EXTRA_STREAM_KBPS, 0.0)
+                val clients = intent.getIntExtra(TelemetryBridgeService.EXTRA_CLIENTS, 0)
+                val thermal = intent.getIntExtra(TelemetryBridgeService.EXTRA_THERMAL, 0)
+                videoStats.text = String.format(
+                    "Frame: %d KB | FPS: %.1f | Speed: %.2f Mbps | Viewers: %d | Thermal: %s",
+                    kb, fps, kbps / 1000.0, clients, thermalLabel(thermal)
+                )
+            }
+        }
+    }
+
+    private val snapshotReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == TelemetryBridgeService.SNAPSHOT_SAVED) {
+                val path = intent.getStringExtra(TelemetryBridgeService.EXTRA_SNAPSHOT_PATH) ?: return
+                Toast.makeText(this@MainActivity, "Снапшот: $path", Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -64,52 +81,31 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Утримуємо екран активним, щоб телефон не блокувався під час трансляції
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-            setShowWhenLocked(true)
-            setTurnScreenOn(true)
-        } else {
-            @Suppress("DEPRECATION")
-            window.addFlags(
-                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
-                WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
-            )
-        }
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-
+        // Екран НЕ утримуємо примусово: для бортового режиму це зайвий нагрів.
         setContentView(R.layout.activity_main)
 
-        zoomLabel = findViewById(R.id.zoomLabel)
-        qualityLabel = findViewById(R.id.qualityLabel)
-        resLabel = findViewById(R.id.resLabel)
-        fpsLabel = findViewById<TextView>(R.id.fpsLabel).apply {
-            text = "Частота кадрів: 5 FPS"
-        }
         videoStats = findViewById(R.id.videoStats)
         tailscaleStatus = findViewById(R.id.tailscaleStatus)
         statusText = findViewById(R.id.status)
+        ecoOverlay = findViewById(R.id.ecoOverlay)
         viewFinder = findViewById(R.id.viewFinder)
-        dimScreenButton = findViewById(R.id.dimScreenButton)
 
-        // Передаємо SurfaceProvider у сервіс для локального відображення камери на екрані
+        // Локальне прев'ю камери увімкнене за замовчуванням.
         TelemetryBridgeService.previewSurfaceProvider = viewFinder.surfaceProvider
 
-        refreshNetworkStatusAsync()
-        setupResolutionAndFpsButtons()
-
-        // Кнопка економії батареї — приглушує екран до 1% для бортового використання
-        dimScreenButton.setOnClickListener {
-            toggleDimScreen()
+        findViewById<Button>(R.id.settingsButton).setOnClickListener {
+            startActivity(Intent(this, SettingsActivity::class.java))
         }
-
-        // Кнопка "Стоп" — зупиняє сервіс
-        findViewById<Button>(R.id.stopButton).setOnClickListener {
-            val intent = Intent(this, TelemetryBridgeService::class.java)
-                .setAction(TelemetryBridgeService.ACTION_STOP)
-            startService(intent)
+        findViewById<Button>(R.id.snapshotButton).setOnClickListener {
+            startServiceAction(TelemetryBridgeService.ACTION_SNAPSHOT)
         }
-
-        // Кнопка "Відкрити в браузері" — відкриває MJPEG-стрім у браузері на телефоні
+        findViewById<Button>(R.id.ecoButton).setOnClickListener {
+            enterEco()
+        }
+        findViewById<Button>(R.id.stopButton).apply {
+            text = "Зупинити сервіс"
+            setOnClickListener { toggleService() }
+        }
         findViewById<Button>(R.id.openBrowserButton).setOnClickListener {
             bgExecutor.execute {
                 val tsIp = NetworkUtils.findTailscaleIp()
@@ -124,11 +120,18 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        setupSeekBars()
+        refreshNetworkStatusAsync()
+
         ContextCompat.registerReceiver(
             this,
             statsReceiver,
             IntentFilter(TelemetryBridgeService.STATS_UPDATE),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+        ContextCompat.registerReceiver(
+            this,
+            snapshotReceiver,
+            IntentFilter(TelemetryBridgeService.SNAPSHOT_SAVED),
             ContextCompat.RECEIVER_NOT_EXPORTED
         )
 
@@ -139,53 +142,106 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun setupResolutionAndFpsButtons() {
-        // Resolution
-        findViewById<Button>(R.id.res640Btn).setOnClickListener {
-            resLabel.text = "Роздільна здатність: 640x480"
-            sendResolutionIntent(640, 480)
+    /**
+     * Керування еко-режимом з апаратних клавіш:
+     *   Гучність «вниз» — увійти, гучність «вгору» — вийти.
+     */
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.action == KeyEvent.ACTION_DOWN) {
+            when (event.keyCode) {
+                KeyEvent.KEYCODE_VOLUME_DOWN -> if (!isEco) {
+                    enterEco()
+                    return true
+                }
+                KeyEvent.KEYCODE_VOLUME_UP -> if (isEco) {
+                    exitEco()
+                    return true
+                }
+            }
         }
-        findViewById<Button>(R.id.res720Btn).setOnClickListener {
-            resLabel.text = "Роздільна здатність: 1280x720 (HD)"
-            sendResolutionIntent(1280, 720)
-        }
-        findViewById<Button>(R.id.res1080Btn).setOnClickListener {
-            resLabel.text = "Роздільна здатність: 1920x1080 (FHD)"
-            sendResolutionIntent(1920, 1080)
-        }
+        return super.dispatchKeyEvent(event)
+    }
 
-        // FPS
-        findViewById<Button>(R.id.fps5Btn).setOnClickListener {
-            fpsLabel.text = "Частота кадрів: 5 FPS"
-            sendFpsIntent(5)
-        }
-        findViewById<Button>(R.id.fps10Btn).setOnClickListener {
-            fpsLabel.text = "Частота кадрів: 10 FPS"
-            sendFpsIntent(10)
-        }
-        findViewById<Button>(R.id.fps15Btn).setOnClickListener {
-            fpsLabel.text = "Частота кадрів: 15 FPS"
-            sendFpsIntent(15)
-        }
-        findViewById<Button>(R.id.fps30Btn).setOnClickListener {
-            fpsLabel.text = "Частота кадрів: 30 FPS"
-            sendFpsIntent(30)
+    private fun toggleService() {
+        val btn = findViewById<Button>(R.id.stopButton)
+        if (serviceRunning) {
+            stopService(Intent(this, TelemetryBridgeService::class.java))
+            serviceRunning = false
+            btn.text = "Продовжити сервіс"
+        } else {
+            startBridgeService()
+            serviceRunning = true
+            btn.text = "Зупинити сервіс"
         }
     }
 
-    private fun sendResolutionIntent(width: Int, height: Int) {
-        val intent = Intent(this, TelemetryBridgeService::class.java).apply {
-            action = TelemetryBridgeService.ACTION_SET_RESOLUTION
-            putExtra(TelemetryBridgeService.EXTRA_WIDTH, width)
-            putExtra(TelemetryBridgeService.EXTRA_HEIGHT, height)
+    private fun enterEco() {
+        if (isEco) return
+        isEco = true
+        // В еко-режимі не смикаємо мережу/UI — менше нагріву.
+        handler.removeCallbacks(networkUpdateRunnable)
+        // Тримаємо екран «увімкненим», але повністю чорним на мінімальній яскравості:
+        // так клавіші гучності далі доходять до застосунку. На OLED чорне ≈ вимкнено.
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        val lp = window.attributes
+        lp.screenBrightness = 0f
+        window.attributes = lp
+        ecoOverlay.visibility = View.VISIBLE
+        // Прибираємо локальне прев'ю (відв'язуємо від камери) — менше нагріву.
+        viewFinder.visibility = View.GONE
+        sendPreviewState(false)
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            hide(WindowInsetsCompat.Type.systemBars())
+            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         }
-        ContextCompat.startForegroundService(this, intent)
+        sendEco(true)
     }
 
-    private fun sendFpsIntent(fps: Int) {
+    private fun exitEco() {
+        if (!isEco) return
+        isEco = false
+        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        val lp = window.attributes
+        lp.screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+        window.attributes = lp
+        ecoOverlay.visibility = View.GONE
+        // Повертаємо локальне прев'ю.
+        viewFinder.visibility = View.VISIBLE
+        TelemetryBridgeService.previewSurfaceProvider = viewFinder.surfaceProvider
+        sendPreviewState(true)
+        WindowCompat.getInsetsController(window, window.decorView).show(WindowInsetsCompat.Type.systemBars())
+        handler.removeCallbacks(networkUpdateRunnable)
+        handler.post(networkUpdateRunnable)
+        sendEco(false)
+    }
+
+    private fun sendEco(on: Boolean) {
+        startServiceAction(TelemetryBridgeService.ACTION_SET_ECO) {
+            putExtra(TelemetryBridgeService.EXTRA_ECO, on)
+        }
+    }
+
+    private fun sendPreviewState(on: Boolean) {
+        startServiceAction(TelemetryBridgeService.ACTION_SET_PREVIEW) {
+            putExtra(TelemetryBridgeService.EXTRA_PREVIEW, on)
+        }
+    }
+
+    private fun thermalLabel(status: Int): String = when (status) {
+        0 -> "OK"
+        1 -> "LIGHT"
+        2 -> "MODERATE"
+        3 -> "SEVERE"
+        4 -> "CRITICAL"
+        5 -> "EMERGENCY"
+        6 -> "SHUTDOWN"
+        else -> "?"
+    }
+
+    private fun startServiceAction(action: String, extras: (Intent.() -> Unit)? = null) {
         val intent = Intent(this, TelemetryBridgeService::class.java).apply {
-            action = TelemetryBridgeService.ACTION_SET_FPS
-            putExtra(TelemetryBridgeService.EXTRA_FPS, fps)
+            this.action = action
+            extras?.invoke(this)
         }
         ContextCompat.startForegroundService(this, intent)
     }
@@ -198,16 +254,15 @@ class MainActivity : AppCompatActivity() {
 
             val statusContent = buildString {
                 if (tsIp != null) {
-                    append("🌐 Tailscale VPN: http://$tsIp:8888/\n")
+                    append("🌐 Tailscale: http://$tsIp:8888/\n")
                 } else {
-                    append("🌐 Tailscale VPN: <немає>\n")
+                    append("🌐 Tailscale: <немає>\n")
                 }
                 if (localIp != null) {
                     append("📡 Hotspot / Wi-Fi: http://$localIp:8888/\n")
                 }
-                append("🎬 MJPEG Stream: http://$primaryIp:8888/stream\n")
-                append("📊 Health Snapshot: http://$primaryIp:8888/health\n")
-                append("📡 Telemetry UDP 14550 -> ${TelemetryBridgeService.DEFAULT_GCS_IP}")
+                append("🎬 Stream: http://$primaryIp:8888/stream\n")
+                append("📊 Health: http://$primaryIp:8888/health")
             }
 
             val tailscaleText: String
@@ -233,57 +288,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun toggleDimScreen() {
-        isDimmed = !isDimmed
-        val lp = window.attributes
-        if (isDimmed) {
-            lp.screenBrightness = 0.01f // 1% яскравість (мінімум)
-            dimScreenButton.text = "Увімкнути екран (100%)"
-        } else {
-            lp.screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
-            dimScreenButton.text = "Економія батареї (Згасити екран)"
-        }
-        window.attributes = lp
-    }
-
-    private fun setupSeekBars() {
-        val zoomSeekBar = findViewById<SeekBar>(R.id.zoomSeekBar)
-        val qualitySeekBar = findViewById<SeekBar>(R.id.qualitySeekBar)
-
-        zoomSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                val zoom = 1.0f + (progress / 10.0f)
-                zoomLabel.text = "Zoom: ${String.format("%.1f", zoom)}x"
-            }
-            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
-            override fun onStopTrackingTouch(seekBar: SeekBar?) {
-                val progress = seekBar?.progress ?: 0
-                val zoom = 1.0f + (progress / 10.0f)
-                sendIntent(TelemetryBridgeService.ACTION_SET_ZOOM, TelemetryBridgeService.EXTRA_ZOOM, zoom)
-            }
-        })
-
-        qualitySeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                qualityLabel.text = "Якість відео (JPEG): $progress%"
-            }
-            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
-            override fun onStopTrackingTouch(seekBar: SeekBar?) {
-                val progress = seekBar?.progress ?: 40
-                sendIntent(TelemetryBridgeService.ACTION_SET_QUALITY, TelemetryBridgeService.EXTRA_QUALITY, progress)
-            }
-        })
-    }
-
-    private fun sendIntent(action: String, extraKey: String, value: Any) {
-        val intent = Intent(this, TelemetryBridgeService::class.java).apply {
-            this.action = action
-            if (value is Float) putExtra(extraKey, value)
-            if (value is Int) putExtra(extraKey, value)
-        }
-        ContextCompat.startForegroundService(this, intent)
-    }
-
     private fun arePermissionsGranted(): Boolean {
         val cameraGranted = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
         val notificationGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -303,12 +307,20 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        // Прев'ю вмикаємо лише коли активність видима (і не в еко).
+        if (!isEco) {
+            TelemetryBridgeService.previewSurfaceProvider = viewFinder.surfaceProvider
+            sendPreviewState(true)
+        }
         handler.removeCallbacks(networkUpdateRunnable)
         handler.post(networkUpdateRunnable)
     }
 
     override fun onPause() {
         super.onPause()
+        // Екран/активність невидимі — вимикаємо прев'ю: менше нагріву від камери/GPU.
+        TelemetryBridgeService.previewSurfaceProvider = null
+        sendPreviewState(false)
         handler.removeCallbacks(networkUpdateRunnable)
     }
 
@@ -319,6 +331,9 @@ class MainActivity : AppCompatActivity() {
         bgExecutor.shutdown()
         try {
             unregisterReceiver(statsReceiver)
+        } catch (_: IllegalArgumentException) {}
+        try {
+            unregisterReceiver(snapshotReceiver)
         } catch (_: IllegalArgumentException) {}
     }
 

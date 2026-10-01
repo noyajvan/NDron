@@ -51,6 +51,11 @@
                 android:resource="@xml/usb_device_filter" />
         </activity>
 
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="false"
+            android:label="Налаштування" />
+
         <!-- Декларація Foreground Service для роботи з USB та 4G -->
         <service
             android:name=".TelemetryBridgeService"

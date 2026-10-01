@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Стилізований лінійний малюнок: хлопчик зі шарфом на крихітній планеті,
+     зірки та троянда. Легко замінити власним растровим малюнком. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="104dp"
+    android:height="104dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- планета -->
+    <path
+        android:pathData="M36,82 a18,18 0 1,0 36,0 a18,18 0 1,0 -36,0"
+        android:strokeColor="#455A64"
+        android:strokeWidth="2.4"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+
+    <!-- тіло -->
+    <path
+        android:pathData="M54,52 L54,64"
+        android:strokeColor="#455A64"
+        android:strokeWidth="2.4"
+        android:strokeLineCap="round" />
+
+    <!-- руки -->
+    <path
+        android:pathData="M54,56 L62,59 M54,56 L46,59"
+        android:strokeColor="#455A64"
+        android:strokeWidth="2.4"
+        android:strokeLineCap="round" />
+
+    <!-- голова -->
+    <path
+        android:pathData="M47,44 a7,7 0 1,0 14,0 a7,7 0 1,0 -14,0"
+        android:strokeColor="#455A64"
+        android:strokeWidth="2.4"
+        android:strokeLineCap="round" />
+
+    <!-- волосся (кілька штрихів) -->
+    <path
+        android:pathData="M49,37 C51,34 55,33 58,35 M47,40 C46,36 49,32 53,31"
+        android:strokeColor="#455A64"
+        android:strokeWidth="2"
+        android:strokeLineCap="round" />
+
+    <!-- шарф біля шиї -->
+    <path
+        android:pathData="M48,52 C52,55 57,55 61,53"
+        android:strokeColor="#455A64"
+        android:strokeWidth="2.4"
+        android:strokeLineCap="round" />
+
+    <!-- шарф, що майорить -->
+    <path
+        android:pathData="M60,53 C70,50 74,59 86,55"
+        android:strokeColor="#455A64"
+        android:strokeWidth="2.4"
+        android:strokeLineCap="round" />
+
+    <!-- троянда на планеті -->
+    <path
+        android:pathData="M71,80 L71,72 M67,72 C67,67 75,67 75,72 M71,76 C74,75 76,77 75,79"
+        android:strokeColor="#455A64"
+        android:strokeWidth="2.2"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+
+    <!-- зірка праворуч -->
+    <path
+        android:pathData="M85,27 L85,34 M81.5,30.5 L88.5,30.5"
+        android:strokeColor="#455A64"
+        android:strokeWidth="2.2"
+        android:strokeLineCap="round" />
+
+    <!-- зірочка ліворуч -->
+    <path
+        android:pathData="M24,34 L24,39 M21.5,36.5 L26.5,36.5"
+        android:strokeColor="#455A64"
+        android:strokeWidth="1.9"
+        android:strokeLineCap="round" />
+
+</vector>
